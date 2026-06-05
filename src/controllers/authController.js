@@ -3,6 +3,7 @@ const authService = require('../services/authService');
 const { createOTP, verifyOTP, sendEmailOTP, sendSMSOTP } = require('../services/otpService');
 const { generateAccessToken, generateRefreshToken, verifyAccessToken, verifyRefreshToken } = require('../services/tokenService');
 const { env, isProductionEnv } = require('../config/env');
+const { extractBearerToken } = require('../utils/authCookies');
 
 function buildCookieOptions(maxAge) {
   const options = {
@@ -121,17 +122,17 @@ async function login(req, res, next) {
 
 async function guestSession(req, res, next) {
   try {
-    const accessTokenCookie = req.cookies?.accessToken;
-    if (accessTokenCookie) {
+    const existingAccessToken = req.cookies?.accessToken || extractBearerToken(req.headers.authorization || '');
+    if (existingAccessToken) {
       try {
-        const decoded = verifyAccessToken(accessTokenCookie);
+        const decoded = verifyAccessToken(existingAccessToken);
         const existingUser = await UserModel.findById(decoded.sub);
 
         if (existingUser) {
           return res.json({
             success: true,
             message: 'Session already active',
-            ...buildAuthPayload(existingUser, accessTokenCookie),
+            ...buildAuthPayload(existingUser, existingAccessToken),
           });
         }
       } catch {
@@ -193,6 +194,23 @@ async function refreshToken(req, res, next) {
   try {
     const refreshToken = req.cookies?.refreshToken;
     if (!refreshToken) {
+      const accessToken = req.cookies?.accessToken || extractBearerToken(req.headers.authorization || '');
+
+      if (accessToken) {
+        try {
+          verifyAccessToken(accessToken);
+          return res.json({
+            success: true,
+            message: 'Access token still active',
+            accessToken,
+            token: accessToken,
+            data: { accessToken },
+          });
+        } catch {
+          // Fall through to missing refresh response.
+        }
+      }
+
       return res.status(401).json({ success: false, message: 'Refresh token missing' });
     }
     const decoded = verifyRefreshToken(refreshToken);

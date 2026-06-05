@@ -17,18 +17,39 @@ function readNumber(name, fallback) {
 function readList(name, fallback) {
   const rawValue = (process.env[name] || '').trim();
   if (!rawValue) return fallback;
-  return rawValue.split(',').map((v) => v.trim()).filter(Boolean);
+  return rawValue.split(',').map((v) => v.trim().replace(/\/$/, '')).filter(Boolean);
 }
 
+function mergeLists(...lists) {
+  return Array.from(new Set(lists.flat().filter(Boolean)));
+}
+
+const defaultClientOrigins = [
+  'http://localhost:5173',
+  'http://localhost:8081',
+  'http://localhost:8100',
+  'http://localhost:19006',
+  'http://localhost',
+  'https://localhost',
+  'https://localhost:8100',
+  'capacitor://localhost',
+  'ionic://localhost',
+];
+
+const defaultNativeClientOriginSchemes = [
+  'capacitor',
+  'ionic',
+];
+
 const env = {
-  clientOrigins: readList('CLIENT_ORIGIN', [
-    'http://localhost:5173',
-    'http://localhost:8081',
-    'http://localhost:19006',
-    'http://localhost',
-    'https://localhost',
-    'capacitor://localhost',
-  ]),
+  clientOrigins: mergeLists(
+    defaultClientOrigins,
+    readList('CLIENT_ORIGIN', [])
+  ),
+  nativeClientOriginSchemes: mergeLists(
+    defaultNativeClientOriginSchemes,
+    readList('NATIVE_CLIENT_ORIGIN_SCHEMES', [])
+  ),
   elevenLabsApiKey: readEnv('ELEVENLABS_API_KEY'),
   elevenLabsVoiceId: readEnv('ELEVENLABS_VOICE_ID'),
   geminiApiKey: readEnv('GEMINI_API_KEY'),
@@ -58,9 +79,23 @@ function isProductionEnv() {
   return env.nodeEnv === 'production';
 }
 
-function isAllowedCorsOrigin(origin) {
-  if (!origin || origin === 'null') return true;
-  return env.clientOrigins.includes(origin);
+function isNativeAppOrigin(origin) {
+  try {
+    const parsedOrigin = new URL(origin);
+    const protocol = parsedOrigin.protocol.replace(':', '');
+    return (
+      env.nativeClientOriginSchemes.includes(protocol) &&
+      (parsedOrigin.hostname === 'localhost' || parsedOrigin.hostname === '')
+    );
+  } catch {
+    return false;
+  }
 }
 
-module.exports = { env, isProductionEnv, isAllowedCorsOrigin };
+function isAllowedCorsOrigin(origin) {
+  if (!origin || origin === 'null') return true;
+  const normalizedOrigin = origin.trim().replace(/\/$/, '');
+  return env.clientOrigins.includes(normalizedOrigin) || isNativeAppOrigin(normalizedOrigin);
+}
+
+module.exports = { env, isProductionEnv, isAllowedCorsOrigin, isNativeAppOrigin };

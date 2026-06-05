@@ -27,7 +27,14 @@ const createApp = () => {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: [
+      'Accept',
+      'Authorization',
+      'Content-Type',
+      'X-App-Version',
+      'X-Client-Platform',
+      'X-Requested-With',
+    ],
     preflightContinue: false,
     optionsSuccessStatus: 204,
   }));
@@ -44,7 +51,9 @@ const createApp = () => {
   app.use('/api/live', liveRoutes);
   app.use('/api/tts', ttsRoutes);
 
-  app.get('/', (req, res) => res.json({ success: true, message: 'API Running' }));
+  app.get('/', (_req, res) => res.json({ success: true, message: 'API Running' }));
+  app.get('/health', (_req, res) => res.json({ success: true, ok: true, message: 'API Running' }));
+  app.get('/api/health', (_req, res) => res.json({ success: true, ok: true, message: 'API Running' }));
 
   app.use(errorHandler);
   return app;
