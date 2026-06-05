@@ -22,6 +22,19 @@ function setAuthCookies(res, accessToken, refreshToken) {
   res.cookie('refreshToken', refreshToken, buildCookieOptions(30 * 24 * 60 * 60 * 1000));
 }
 
+function buildAuthPayload(user, accessToken) {
+  const safeUser = sanitizeUser(user);
+  return {
+    accessToken,
+    token: accessToken,
+    user: safeUser,
+    data: {
+      accessToken,
+      user: safeUser,
+    },
+  };
+}
+
 function clearAuthCookies(res) {
   res.clearCookie('accessToken', buildCookieOptions(0));
   res.clearCookie('refreshToken', buildCookieOptions(0));
@@ -102,7 +115,7 @@ async function login(req, res, next) {
     const { email, password } = req.body;
     const { user, accessToken, refreshToken } = await authService.loginWithEmail(email, password);
     setAuthCookies(res, accessToken, refreshToken);
-    res.json({ success: true, message: 'Logged in successfully', data: { user: sanitizeUser(user) } });
+    res.json({ success: true, message: 'Logged in successfully', ...buildAuthPayload(user, accessToken) });
   } catch (err) { next(err); }
 }
 
@@ -118,7 +131,7 @@ async function guestSession(req, res, next) {
           return res.json({
             success: true,
             message: 'Session already active',
-            data: { user: sanitizeUser(existingUser) },
+            ...buildAuthPayload(existingUser, accessTokenCookie),
           });
         }
       } catch {
@@ -143,7 +156,7 @@ async function guestSession(req, res, next) {
           return res.json({
             success: true,
             message: 'Session refreshed',
-            data: { user: sanitizeUser(existingUser) },
+            ...buildAuthPayload(existingUser, result.accessToken),
           });
         }
       } catch {
@@ -156,7 +169,7 @@ async function guestSession(req, res, next) {
     const refreshToken = generateRefreshToken({ sub: user._id });
     await authService.createSession(user._id, refreshToken);
     setAuthCookies(res, accessToken, refreshToken);
-    res.status(201).json({ success: true, message: 'Guest session created', data: { user: sanitizeUser(user) } });
+    res.status(201).json({ success: true, message: 'Guest session created', ...buildAuthPayload(user, accessToken) });
   } catch (err) { next(err); }
 }
 
@@ -172,7 +185,7 @@ async function googleLogin(req, res, next) {
       return res.json({ success: true, message: 'Mobile verification required', data: { user: result.user, pendingMobileVerification: true } });
     }
     setAuthCookies(res, result.accessToken, result.refreshToken);
-    res.json({ success: true, message: 'Logged in with Google successfully', data: { user: sanitizeUser(result.user) } });
+    res.json({ success: true, message: 'Logged in with Google successfully', ...buildAuthPayload(result.user, result.accessToken) });
   } catch (err) { next(err); }
 }
 
@@ -185,7 +198,13 @@ async function refreshToken(req, res, next) {
     const decoded = verifyRefreshToken(refreshToken);
     const result = await authService.refreshSession(decoded.sub, refreshToken, req.headers['user-agent'], req.ip);
     setAuthCookies(res, result.accessToken, result.refreshToken);
-    res.json({ success: true, message: 'Token refreshed' });
+    res.json({
+      success: true,
+      message: 'Token refreshed',
+      accessToken: result.accessToken,
+      token: result.accessToken,
+      data: { accessToken: result.accessToken },
+    });
   } catch (err) { next(err); }
 }
 

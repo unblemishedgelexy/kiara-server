@@ -1,11 +1,20 @@
 const { verifyAccessToken } = require('../services/tokenService');
 const { extractBearerToken } = require('../utils/authCookies');
 
-function authMiddleware(req, res, next) {
+function readRequestToken(req) {
   const cookieToken = req.cookies?.accessToken;
   const authHeader = req.headers.authorization || '';
   const bearerToken = extractBearerToken(authHeader);
-  const token = cookieToken || bearerToken;
+  return cookieToken || bearerToken;
+}
+
+function attachAuthUser(req, payload) {
+  const userId = payload.sub || payload.userId || payload.id;
+  req.userId = typeof userId === 'object' && userId !== null && userId.id ? userId.id : userId;
+}
+
+function authMiddleware(req, res, next) {
+  const token = readRequestToken(req);
 
   if (!token) {
     return res.status(401).json({ success: false, message: 'Authentication required.' });
@@ -13,11 +22,31 @@ function authMiddleware(req, res, next) {
 
   try {
     const payload = verifyAccessToken(token);
-    req.userId = payload.sub;
+    attachAuthUser(req, payload);
     next();
   } catch (err) {
     return res.status(401).json({ success: false, message: 'Invalid or expired token.' });
   }
 }
+
+function optionalAuthMiddleware(req, _res, next) {
+  const token = readRequestToken(req);
+
+  if (!token) {
+    next();
+    return;
+  }
+
+  try {
+    const payload = verifyAccessToken(token);
+    attachAuthUser(req, payload);
+  } catch {
+    req.userId = undefined;
+  }
+
+  next();
+}
+
+authMiddleware.optional = optionalAuthMiddleware;
 
 module.exports = authMiddleware;

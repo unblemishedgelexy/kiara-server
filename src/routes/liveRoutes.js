@@ -13,7 +13,7 @@ router.get('/health', (_req, res) => {
   });
 });
 
-router.post('/token', authMiddleware, async (_req, res) => {
+router.post('/token', authMiddleware.optional, async (_req, res) => {
   if (!env.geminiApiKey) {
     res.status(503).json({ error: 'Gemini server key is missing.' });
     return;
