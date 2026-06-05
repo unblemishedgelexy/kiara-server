@@ -106,7 +106,13 @@ function createLiveConnectConfig(sessionConfig) {
     realtimeInputConfig: {
       automaticActivityDetection: {
         disabled: false,
+        endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
+        prefixPaddingMs: 120,
+        silenceDurationMs: 420,
+        startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
       },
+      activityHandling: 'START_OF_ACTIVITY_INTERRUPTS',
+      turnCoverage: 'TURN_INCLUDES_ONLY_ACTIVITY',
     },
     responseModalities: sessionConfig.responseModalities,
     sessionResumption: {},
