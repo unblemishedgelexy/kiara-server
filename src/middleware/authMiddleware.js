@@ -2,10 +2,9 @@ const { verifyAccessToken } = require('../services/tokenService');
 const { extractBearerToken } = require('../utils/authCookies');
 
 function readRequestToken(req) {
-  const cookieToken = req.cookies?.accessToken;
   const authHeader = req.headers.authorization || '';
   const bearerToken = extractBearerToken(authHeader);
-  return cookieToken || bearerToken;
+  return bearerToken || req.headers['x-access-token'];
 }
 
 function attachAuthUser(req, payload) {

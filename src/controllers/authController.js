@@ -4,28 +4,6 @@ const { verifyAccessToken, verifyRefreshToken, generateAccessToken, generateRefr
 const { env, isProductionEnv } = require('../config/env');
 const { extractBearerToken } = require('../utils/authCookies');
 
-function buildCookieOptions(maxAge) {
-  const options = {
-    httpOnly: true,
-    secure: isProductionEnv(),
-    sameSite: isProductionEnv() ? 'none' : 'lax',
-    maxAge,
-  };
-  if (env.cookieDomain) {
-    options.domain = env.cookieDomain;
-  }
-  return options;
-}
-
-function setAuthCookies(res, accessToken, refreshToken) {
-  res.cookie('accessToken', accessToken, buildCookieOptions(15 * 60 * 1000));
-  res.cookie('refreshToken', refreshToken, buildCookieOptions(30 * 24 * 60 * 60 * 1000));
-}
-
-function clearAuthCookies(res) {
-  res.clearCookie('accessToken', buildCookieOptions(0));
-  res.clearCookie('refreshToken', buildCookieOptions(0));
-}
 
 function buildAuthPayload(user, accessToken, refreshToken) {
   const safeUser = authService.sanitizeUser(user);
@@ -131,10 +109,6 @@ async function login(req, res, next) {
     // Login with email and password
     const result = await authService.loginWithEmailPassword(email, password);
     
-    // Set secure HttpOnly cookies
-    setAuthCookies(res, result.accessToken, result.refreshToken);
-    
-    // Return success response
     res.json({
       success: true,
       message: 'Logged in successfully.',
@@ -156,32 +130,14 @@ async function refreshToken(req, res, next) {
     const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string'
       ? req.headers['x-refresh-token']
       : null;
-    const refreshToken = req.cookies?.refreshToken || bodyRefreshToken || headerRefreshToken;
+    const refreshToken = bodyRefreshToken || headerRefreshToken;
 
     if (!refreshToken) {
-      const accessToken = req.cookies?.accessToken || extractBearerToken(req.headers.authorization || '');
-
-      if (accessToken) {
-        try {
-          verifyAccessToken(accessToken);
-          return res.json({
-            success: true,
-            message: 'Access token still active',
-            accessToken,
-            token: accessToken,
-            data: { accessToken },
-          });
-        } catch {
-          // Fall through to missing refresh response.
-        }
-      }
-
       return res.status(401).json({ success: false, message: 'Refresh token missing' });
     }
 
     const decoded = verifyRefreshToken(refreshToken);
     const result = await authService.refreshSession(decoded.sub, refreshToken, req.headers['user-agent'], req.ip);
-    setAuthCookies(res, result.accessToken, result.refreshToken);
     res.json({
       success: true,
       message: 'Token refreshed',
@@ -199,15 +155,19 @@ async function refreshToken(req, res, next) {
 // ============= LOGOUT =============
 async function logout(req, res, next) {
   try {
-    const refreshToken = req.cookies?.refreshToken;
+    const bodyRefreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : null;
+    const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string'
+      ? req.headers['x-refresh-token']
+      : null;
+    const refreshToken = bodyRefreshToken || headerRefreshToken;
+
     if (refreshToken) {
       const decoded = verifyRefreshToken(refreshToken);
       await authService.logout(decoded.sub, refreshToken);
     }
-    clearAuthCookies(res);
+
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (err) {
-    clearAuthCookies(res);
     next(err);
   }
 }
@@ -319,10 +279,6 @@ async function googleAuthCallback(req, res) {
       googleEmail: email,
     });
 
-    // Set cookies
-    setAuthCookies(res, result.accessToken, result.refreshToken);
-
-    // If the caller expects JSON (fetch from frontend), respond with JSON payload
     const wantsJson = (req.headers.accept || '').includes('application/json') || req.query.returnJson === '1';
     if (wantsJson) {
       return res.json({
@@ -332,9 +288,9 @@ async function googleAuthCallback(req, res) {
       });
     }
 
-    // Otherwise redirect to frontend home page with auth set in cookies
     const clientUrl = env.clientOrigins[0] || 'http://localhost:5173';
-    res.redirect(`${clientUrl}/`);
+    const redirectUrl = `${clientUrl}/auth/google/callback?accessToken=${encodeURIComponent(result.accessToken)}&refreshToken=${encodeURIComponent(result.refreshToken)}`;
+    res.redirect(redirectUrl);
   } catch (error) {
     console.error('Google callback error:', error);
     const clientUrl = env.clientOrigins[0] || 'http://localhost:5173';

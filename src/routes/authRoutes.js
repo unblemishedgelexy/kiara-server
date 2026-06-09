@@ -93,7 +93,7 @@ router.post('/logout', logout);
 // NOTE: guest sessions removed — no /guest route
 
 // Google OAuth routes
-router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'], session: false }));
 router.get('/google/callback', 
   passport.authenticate('google', { session: false }),
   googleAuthCallback

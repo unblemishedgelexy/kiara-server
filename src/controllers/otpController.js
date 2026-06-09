@@ -17,20 +17,6 @@ function buildAuthPayload(user, accessToken, refreshToken) {
   };
 }
 
-function buildCookieOptions(maxAge) {
-  return {
-    httpOnly: true,
-    secure: isProductionEnv(),
-    sameSite: isProductionEnv() ? 'none' : 'lax',
-    maxAge,
-    domain: env.cookieDomain || undefined,
-  };
-}
-
-function setAuthCookies(res, accessToken, refreshToken) {
-  res.cookie('accessToken', accessToken, buildCookieOptions(15 * 60 * 1000));
-  res.cookie('refreshToken', refreshToken, buildCookieOptions(30 * 24 * 60 * 60 * 1000));
-}
 
 async function sendOtp(req, res, next) {
   try {
@@ -182,7 +168,6 @@ async function verifyOtp(req, res, next) {
         await pendingRegistrationService.completePendingRegistration(pendingId);
 
         const { accessToken, refreshToken } = await authService.createLoginSession(user._id);
-        setAuthCookies(res, accessToken, refreshToken);
         return res.status(201).json({
           success: true,
           message: 'Registration completed.',

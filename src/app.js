@@ -1,8 +1,6 @@
 const express = require('express');
-const cookieParser = require('cookie-parser');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const cookieSession = require('cookie-session');
 const passport = require('./config/passport');
 const authRoutes = require('./routes/authRoutes');
 const profileRoutes = require('./routes/profileRoutes');
@@ -51,16 +49,8 @@ const createApp = () => {
 
   app.use(bodyParser.json());
   app.use(bodyParser.urlencoded({ extended: true }));
-  app.use(cookieParser());
 
-  // Passport.js session middleware for Google OAuth
-  app.use(cookieSession({
-    name: 'session',
-    keys: ['kiara-session-key-1', 'kiara-session-key-2'],
-    maxAge: 24 * 60 * 60 * 1000, // 24 hours
-  }));
   app.use(passport.initialize());
-  app.use(passport.session());
 
   app.use('/api/auth', authRoutes);
   app.use('/auth', authRoutes);
