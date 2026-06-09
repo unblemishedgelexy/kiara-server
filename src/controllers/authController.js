@@ -1,7 +1,6 @@
-const UserModel = require('../models/User');
 const authService = require('../services/authService');
-const { createOTP, verifyOTP, sendEmailOTP, sendSMSOTP } = require('../services/otpService');
-const { generateAccessToken, generateRefreshToken, verifyAccessToken, verifyRefreshToken } = require('../services/tokenService');
+const UserModel = require('../models/User');
+const { verifyAccessToken, verifyRefreshToken, generateAccessToken, generateRefreshToken } = require('../services/tokenService');
 const { env, isProductionEnv } = require('../config/env');
 const { extractBearerToken } = require('../utils/authCookies');
 
@@ -23,176 +22,142 @@ function setAuthCookies(res, accessToken, refreshToken) {
   res.cookie('refreshToken', refreshToken, buildCookieOptions(30 * 24 * 60 * 60 * 1000));
 }
 
-function buildAuthPayload(user, accessToken) {
-  const safeUser = sanitizeUser(user);
-  return {
-    accessToken,
-    token: accessToken,
-    user: safeUser,
-    data: {
-      accessToken,
-      user: safeUser,
-    },
-  };
-}
-
 function clearAuthCookies(res) {
   res.clearCookie('accessToken', buildCookieOptions(0));
   res.clearCookie('refreshToken', buildCookieOptions(0));
 }
 
-async function register(req, res, next) {
-  try {
-    const { firstName, lastName, email, mobileNumber, password } = req.body;
-    const user = await authService.createUser({ firstName, lastName, email, password, mobileNumber });
-    const emailOtp = await createOTP(user.email, 'email_verify', 300, { userId: user._id });
-    const mobileOtp = await createOTP(user.mobileNumber, 'mobile_verify', 300, { userId: user._id });
-    await sendEmailOTP(user.email, emailOtp.code);
-    await sendSMSOTP(user.mobileNumber, mobileOtp.code);
-    res.status(201).json({ success: true, message: 'Registration started. Verify email and mobile using OTPs.', data: { userId: user._id } });
-  } catch (err) { next(err); }
-}
-
-async function verifyEmailOTP(req, res, next) {
-  try {
-    const { email, code } = req.body;
-    const doc = await verifyOTP(email.toLowerCase(), code, 'email_verify');
-    if (!doc) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired code' });
-    }
-    const user = await UserModel.findByIdAndUpdate(doc.meta.userId, { emailVerified: true }, { returnDocument: 'after' });
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    res.json({ success: true, message: 'Email verified successfully', data: { emailVerified: user.emailVerified } });
-  } catch (err) { next(err); }
-}
-
-async function verifyMobileOTP(req, res, next) {
-  try {
-    const { mobileNumber, code } = req.body;
-    const doc = await verifyOTP(mobileNumber, code, 'mobile_verify');
-    if (!doc) {
-      return res.status(400).json({ success: false, message: 'Invalid or expired code' });
-    }
-    const user = await UserModel.findByIdAndUpdate(doc.meta.userId, { mobileVerified: true }, { returnDocument: 'after' });
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    res.json({ success: true, message: 'Mobile verified successfully', data: { mobileVerified: user.mobileVerified } });
-  } catch (err) { next(err); }
-}
-
-function sanitizeUser(user) {
-  if (!user) return null;
-  const {
-    _id,
-    firstName,
-    lastName,
-    email,
-    emailVerified,
-    mobileNumber,
-    mobileVerified,
-    profilePicture,
-    googleId,
-    role,
-  } = user;
+function buildAuthPayload(user, accessToken, refreshToken) {
+  const safeUser = authService.sanitizeUser(user);
   return {
-    id: String(_id),
-    firstName,
-    lastName,
-    email,
-    emailVerified,
-    mobileNumber,
-    mobileVerified,
-    profilePicture,
-    googleId,
-    role,
+    accessToken,
+    refreshToken,
+    token: accessToken,
+    user: safeUser,
+    data: {
+      accessToken,
+      refreshToken,
+      user: safeUser,
+    },
   };
 }
 
+// ============= REGISTRATION =============
+async function register(req, res, next) {
+  try {
+    const { firstName, lastName, email, password, mobileNumber } = req.body;
+    
+    // Register user
+    const result = await authService.registerUser({
+      firstName,
+      lastName,
+      email,
+      password,
+      mobileNumber,
+    });
+    
+    res.status(201).json({
+      success: true,
+      message: result.message,
+      user: result.user,
+      otpSent: result.otpSent,
+    });
+  } catch (error) {
+    const statusCode = error.message.includes('already') ? 400 : 400;
+    return res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Registration failed.',
+    });
+  }
+}
+
+// ============= OTP HANDLERS =============
+async function sendOtp(req, res, next) {
+  try {
+    const { email, type = 'REGISTER_EMAIL' } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required.' });
+    }
+    
+    // Send OTP
+    await authService.generateAndSendOTP(email, type);
+    
+    res.json({
+      success: true,
+      message: `OTP sent to ${email}. Valid for 10 minutes.`,
+    });
+  } catch (error) {
+    const statusCode = error.message.includes('allowed') ? 400 : 500;
+    return res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Failed to send OTP.',
+    });
+  }
+}
+
+async function verifyOtp(req, res, next) {
+  try {
+    const { email, code, type = 'REGISTER_EMAIL' } = req.body;
+    
+    if (!email || !code) {
+      return res.status(400).json({ success: false, message: 'Email and OTP code are required.' });
+    }
+    
+    // Verify OTP
+    await authService.verifyOTP(email, code, type);
+    
+    res.json({
+      success: true,
+      message: 'OTP verified successfully. You can now login.',
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error.message || 'OTP verification failed.',
+    });
+  }
+}
+
+// ============= LOGIN =============
 async function login(req, res, next) {
   try {
     const { email, password } = req.body;
-    const { user, accessToken, refreshToken } = await authService.loginWithEmail(email, password);
-    setAuthCookies(res, accessToken, refreshToken);
-    res.json({ success: true, message: 'Logged in successfully', ...buildAuthPayload(user, accessToken) });
-  } catch (err) { next(err); }
-}
-
-async function guestSession(req, res, next) {
-  try {
-    const existingAccessToken = req.cookies?.accessToken || extractBearerToken(req.headers.authorization || '');
-    if (existingAccessToken) {
-      try {
-        const decoded = verifyAccessToken(existingAccessToken);
-        const existingUser = await UserModel.findById(decoded.sub);
-
-        if (existingUser) {
-          return res.json({
-            success: true,
-            message: 'Session already active',
-            ...buildAuthPayload(existingUser, existingAccessToken),
-          });
-        }
-      } catch {
-        // Try refresh token before creating a guest session.
-      }
+    
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'Email and password are required.' });
     }
-
-    const refreshTokenCookie = req.cookies?.refreshToken;
-    if (refreshTokenCookie) {
-      try {
-        const decoded = verifyRefreshToken(refreshTokenCookie);
-        const result = await authService.refreshSession(
-          decoded.sub,
-          refreshTokenCookie,
-          req.headers['user-agent'],
-          req.ip
-        );
-        const existingUser = await UserModel.findById(decoded.sub);
-
-        if (existingUser) {
-          setAuthCookies(res, result.accessToken, result.refreshToken);
-          return res.json({
-            success: true,
-            message: 'Session refreshed',
-            ...buildAuthPayload(existingUser, result.accessToken),
-          });
-        }
-      } catch {
-        // Fall through and create a new guest session.
-      }
-    }
-
-    const user = await authService.ensureGuestUser();
-    const accessToken = generateAccessToken({ sub: user._id });
-    const refreshToken = generateRefreshToken({ sub: user._id });
-    await authService.createSession(user._id, refreshToken);
-    setAuthCookies(res, accessToken, refreshToken);
-    res.status(201).json({ success: true, message: 'Guest session created', ...buildAuthPayload(user, accessToken) });
-  } catch (err) { next(err); }
-}
-
-async function googleLogin(req, res, next) {
-  try {
-    const { idToken, mobileNumber } = req.body;
-    const result = await authService.loginWithGoogleToken(idToken, mobileNumber);
-    if (result.pendingMobileVerification) {
-      if (mobileNumber) {
-        const otp = await createOTP(mobileNumber, 'mobile_verify', 300, { userId: result.user._id });
-        await sendSMSOTP(mobileNumber, otp.code);
-      }
-      return res.json({ success: true, message: 'Mobile verification required', data: { user: result.user, pendingMobileVerification: true } });
-    }
+    
+    // Login with email and password
+    const result = await authService.loginWithEmailPassword(email, password);
+    
+    // Set secure HttpOnly cookies
     setAuthCookies(res, result.accessToken, result.refreshToken);
-    res.json({ success: true, message: 'Logged in with Google successfully', ...buildAuthPayload(result.user, result.accessToken) });
-  } catch (err) { next(err); }
+    
+    // Return success response
+    res.json({
+      success: true,
+      message: 'Logged in successfully.',
+      ...buildAuthPayload(result.user, result.accessToken, result.refreshToken),
+    });
+  } catch (error) {
+    const statusCode = error.message.includes('Invalid') || error.message.includes('password') ? 401 : 400;
+    return res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Login failed.',
+    });
+  }
 }
 
+// ============= TOKEN REFRESH =============
 async function refreshToken(req, res, next) {
   try {
-    const refreshToken = req.cookies?.refreshToken;
+    const bodyRefreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : null;
+    const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string'
+      ? req.headers['x-refresh-token']
+      : null;
+    const refreshToken = req.cookies?.refreshToken || bodyRefreshToken || headerRefreshToken;
+
     if (!refreshToken) {
       const accessToken = req.cookies?.accessToken || extractBearerToken(req.headers.authorization || '');
 
@@ -213,6 +178,7 @@ async function refreshToken(req, res, next) {
 
       return res.status(401).json({ success: false, message: 'Refresh token missing' });
     }
+
     const decoded = verifyRefreshToken(refreshToken);
     const result = await authService.refreshSession(decoded.sub, refreshToken, req.headers['user-agent'], req.ip);
     setAuthCookies(res, result.accessToken, result.refreshToken);
@@ -220,12 +186,17 @@ async function refreshToken(req, res, next) {
       success: true,
       message: 'Token refreshed',
       accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
       token: result.accessToken,
-      data: { accessToken: result.accessToken },
+      data: {
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+      },
     });
   } catch (err) { next(err); }
 }
 
+// ============= LOGOUT =============
 async function logout(req, res, next) {
   try {
     const refreshToken = req.cookies?.refreshToken;
@@ -241,5 +212,139 @@ async function logout(req, res, next) {
   }
 }
 
-module.exports = { register, verifyEmailOTP, verifyMobileOTP, login, googleLogin, refreshToken, logout, guestSession };
+// ============= FORGOT PASSWORD =============
+async function sendForgotPasswordOtp(req, res, next) {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required.' });
+    }
+    
+    // Send OTP
+    await authService.sendForgotPasswordOTP(email);
+    
+    res.json({
+      success: true,
+      message: `Password reset link sent to ${email}. Check your email for OTP.`,
+    });
+  } catch (error) {
+    const statusCode = error.message.includes('allowed') ? 400 : 500;
+    return res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Failed to send reset OTP.',
+    });
+  }
+}
 
+async function verifyForgotPasswordOtp(req, res, next) {
+  try {
+    const { email, code } = req.body;
+    
+    if (!email || !code) {
+      return res.status(400).json({ success: false, message: 'Email and OTP code are required.' });
+    }
+    
+    // Verify OTP
+    await authService.verifyForgotPasswordOTP(email, code);
+    
+    res.json({
+      success: true,
+      message: 'OTP verified. You can now reset your password.',
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error.message || 'OTP verification failed.',
+    });
+  }
+}
+
+async function resetPasswordHandler(req, res, next) {
+  try {
+    const { email, newPassword, confirmPassword } = req.body;
+    
+    if (!email || !newPassword || !confirmPassword) {
+      return res.status(400).json({ success: false, message: 'Email, password, and confirmation are required.' });
+    }
+    
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ success: false, message: 'Passwords do not match.' });
+    }
+    
+    if (newPassword.length < 8) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters long.' });
+    }
+    
+    // Reset password
+    await authService.resetPassword(email, newPassword);
+    
+    res.json({
+      success: true,
+      message: 'Password reset successfully. You can now login with your new password.',
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error.message || 'Password reset failed.',
+    });
+  }
+}
+
+// ============= GOOGLE OAUTH =============
+async function googleAuthCallback(req, res) {
+  try {
+    if (!req.user) {
+      // If request expects JSON, return an error JSON instead of redirecting
+      const clientUrl = env.clientOrigins[0] || 'http://localhost:5173';
+      if ((req.headers.accept || '').includes('application/json') || req.query.returnJson === '1') {
+        return res.status(400).json({ success: false, message: 'Google authentication failed' });
+      }
+      return res.redirect(`${clientUrl}/login?error=google_auth_failed`);
+    }
+
+    // Get user info from Google passport strategy
+    const { id: googleId, displayName, emails, photos } = req.user;
+    const email = emails?.[0]?.value || '';
+    const profilePicture = photos?.[0]?.value || '';
+    const [firstName, lastName] = displayName ? displayName.split(' ') : ['', ''];
+
+    // Login or register with Google
+    const result = await authService.loginWithGoogle({
+      googleId,
+      email,
+      firstName,
+      lastName,
+      profilePicture,
+      googleEmail: email,
+    });
+
+    // Set cookies
+    setAuthCookies(res, result.accessToken, result.refreshToken);
+
+    // If the caller expects JSON (fetch from frontend), respond with JSON payload
+    const wantsJson = (req.headers.accept || '').includes('application/json') || req.query.returnJson === '1';
+    if (wantsJson) {
+      return res.json({
+        success: true,
+        message: result.message || 'Logged in with Google',
+        ...buildAuthPayload(result.user, result.accessToken, result.refreshToken),
+      });
+    }
+
+    // Otherwise redirect to frontend home page with auth set in cookies
+    const clientUrl = env.clientOrigins[0] || 'http://localhost:5173';
+    res.redirect(`${clientUrl}/`);
+  } catch (error) {
+    console.error('Google callback error:', error);
+    const clientUrl = env.clientOrigins[0] || 'http://localhost:5173';
+    if ((req.headers.accept || '').includes('application/json') || req.query.returnJson === '1') {
+      return res.status(500).json({ success: false, message: error.message || 'Google callback error' });
+    }
+    res.redirect(`${clientUrl}/login?error=${encodeURIComponent(error.message)}`);
+  }
+}
+
+// Guest sessions removed — functionality intentionally disabled.
+
+module.exports = { register, sendOtp, verifyOtp, login, refreshToken, logout, sendForgotPasswordOtp, verifyForgotPasswordOtp, resetPasswordHandler, googleAuthCallback };

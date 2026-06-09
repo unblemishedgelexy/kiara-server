@@ -4,23 +4,37 @@ const { env } = require('../config/env');
 const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
+const geminiHealth = require('../services/geminiHealth');
 
-router.get('/health', (_req, res) => {
+router.get('/health', async (_req, res) => {
+  const health = geminiHealth.getStatus();
   res.json({
     elevenLabsConfigured: Boolean(env.elevenLabsApiKey && env.elevenLabsVoiceId),
     geminiConfigured: Boolean(env.geminiApiKey),
-    ok: Boolean(env.geminiApiKey),
+    geminiAvailable: Boolean(health.available),
+    geminiLastError: health.lastError,
+    ok: Boolean(env.geminiApiKey) && Boolean(health.available),
   });
 });
 
-router.post('/token', authMiddleware.optional, async (_req, res) => {
+router.post('/health/check', async (_req, res) => {
+  try {
+    const result = await geminiHealth.checkOnce();
+    res.json({ success: true, status: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+router.post('/token', authMiddleware, async (req, res) => {
   if (!env.geminiApiKey) {
     res.status(503).json({ error: 'Gemini server key is missing.' });
     return;
   }
 
   try {
-    const token = await createLiveEphemeralToken();
+    const userId = req.userId || null;
+    const token = await createLiveEphemeralToken(userId);
     res.json({
       expireTime: token.expireTime,
       newSessionExpireTime: token.newSessionExpireTime,

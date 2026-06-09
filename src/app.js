@@ -2,6 +2,8 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const bodyParser = require('body-parser');
 const cors = require('cors');
+const cookieSession = require('cookie-session');
+const passport = require('./config/passport');
 const authRoutes = require('./routes/authRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const passwordRoutes = require('./routes/passwordRoutes');
@@ -16,6 +18,14 @@ const { isAllowedCorsOrigin } = require('./config/env');
 const createApp = () => {
   const app = express();
   security(app);
+
+  // Start background gemini health poller so /auth/token health can be reported
+  try {
+    const geminiHealth = require('./services/geminiHealth');
+    geminiHealth.startPoll();
+  } catch (e) {
+    console.warn('Failed to start gemini health poller', e);
+  }
 
   app.use(cors({
     origin: (origin, callback) => {
@@ -43,7 +53,17 @@ const createApp = () => {
   app.use(bodyParser.urlencoded({ extended: true }));
   app.use(cookieParser());
 
+  // Passport.js session middleware for Google OAuth
+  app.use(cookieSession({
+    name: 'session',
+    keys: ['kiara-session-key-1', 'kiara-session-key-2'],
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+  }));
+  app.use(passport.initialize());
+  app.use(passport.session());
+
   app.use('/api/auth', authRoutes);
+  app.use('/auth', authRoutes);
   app.use('/api/profile', profileRoutes);
   app.use('/api/password', passwordRoutes);
   app.use('/api/ai', aiRoutes);

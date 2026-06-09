@@ -44,7 +44,7 @@ async function summarizeConversation(input) {
   }
 }
 
-async function createLiveEphemeralToken() {
+async function createLiveEphemeralToken(requestingUserId = null) {
   if (!hasGeminiServerAccess()) {
     throw new Error('Gemini API key unavailable');
   }
@@ -81,6 +81,15 @@ async function createLiveEphemeralToken() {
 
     if (!liveToken?.name) {
       throw new Error('Failed to create Gemini live ephemeral token.');
+    }
+
+    // Save mapping from token name -> requesting user id for audit/troubleshooting
+    try {
+      const liveTokenStore = require('./liveTokenStore');
+      liveTokenStore.saveTokenMapping(liveToken.name, requestingUserId || 'anonymous', expireTime);
+    } catch (e) {
+      // non-fatal
+      console.warn('Failed to save live token mapping:', e);
     }
 
     return {

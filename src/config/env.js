@@ -26,6 +26,7 @@ function mergeLists(...lists) {
 
 const defaultClientOrigins = [
   'http://localhost:5173',
+  'http://localhost:5174',
   'http://localhost:8081',
   'http://localhost:8100',
   'http://localhost:19006',
@@ -59,8 +60,14 @@ const env = {
   jwtAccessSecret: readEnv('JWT_ACCESS_SECRET', ''),
   jwtRefreshSecret: readEnv('JWT_REFRESH_SECRET', ''),
   googleClientId: readEnv('GOOGLE_CLIENT_ID', ''),
+  googleClientSecret: readEnv('GOOGLE_CLIENT_SECRET', ''),
+  serverUrl: readEnv('SERVER_URL', 'http://localhost:4000'),
   emailFrom: readEnv('EMAIL_FROM', 'no-reply@example.com'),
   emailTransportUrl: readEnv('EMAIL_TRANSPORT_URL', ''),
+  smsTransportUrl: readEnv('SMS_TRANSPORT_URL', ''),
+  twilioAccountSid: readEnv('TWILIO_ACCOUNT_SID', ''),
+  twilioAuthToken: readEnv('TWILIO_AUTH_TOKEN', ''),
+  twilioFromNumber: readEnv('TWILIO_FROM_NUMBER', ''),
   cookieDomain: readEnv('COOKIE_DOMAIN', ''),
   aesSecret: readEnv('AES_SECRET', 'aes-secret-32-bytes-length!!'),
   mongoUri: readEnv('MONGODB_URI', 'mongodb://127.0.0.1:27017/kiara_ai'),
@@ -73,6 +80,11 @@ const env = {
   redisPassword: readEnv('REDIS_PASSWORD', ''),
   // Memory TTL Configuration
   shortTermMemoryTTL: readNumber('SHORT_TERM_MEMORY_TTL', 3600), // 1 hour
+  // ImageKit configuration
+  imagekitPublicKey: readEnv('IMAGEKIT_PUBLIC_KEY', ''),
+  imagekitPrivateKey: readEnv('IMAGEKIT_PRIVATE_KEY', ''),
+  imagekitUrlEndpoint: readEnv('IMAGEKIT_URL_ENDPOINT', ''),
+  imagekitFolder: readEnv('IMAGEKIT_FOLDER', '/profiles'),
 };
 
 function isProductionEnv() {

@@ -1,55 +1,103 @@
 const express = require('express');
 const Joi = require('joi');
 const validateRequest = require('../middleware/validateRequest');
-const { register, verifyEmailOTP, verifyMobileOTP, login, googleLogin, refreshToken, logout, guestSession } = require('../controllers/authController');
+const authMiddleware = require('../middleware/authMiddleware');
+const { register, sendOtp, verifyOtp, login, refreshToken, logout, sendForgotPasswordOtp, verifyForgotPasswordOtp, resetPasswordHandler, googleAuthCallback } = require('../controllers/authController');
+const passport = require('passport');
 
 const router = express.Router();
 
+// PRODUCTION RULES:
+// - Email/password authentication with @gmail.com only
+// - OTP-based email verification
+// - Password-based login
+// - Google OAuth supported
+// - No SMS OTP
+// - Forgot password via email OTP
+
+// Registration Schema
 const registerSchema = Joi.object({
   body: Joi.object({
-    firstName: Joi.string().trim().required(),
-    lastName: Joi.string().trim().required(),
-    email: Joi.string().email().required(),
-    mobileNumber: Joi.string().trim().required(),
+    firstName: Joi.string().required().trim(),
+    lastName: Joi.string().required().trim(),
+    email: Joi.string().email().required().lowercase(),
     password: Joi.string().min(8).required(),
+    mobileNumber: Joi.string().optional().trim(),
   }),
 });
 
-const verifyEmailSchema = Joi.object({
-  body: Joi.object({
-    email: Joi.string().email().required(),
-    code: Joi.string().length(6).required(),
-  }),
-});
-
-const verifyMobileSchema = Joi.object({
-  body: Joi.object({
-    mobileNumber: Joi.string().trim().required(),
-    code: Joi.string().length(6).required(),
-  }),
-});
-
+// Login Schema
 const loginSchema = Joi.object({
   body: Joi.object({
-    email: Joi.string().email().required(),
+    email: Joi.string().email().required().lowercase(),
     password: Joi.string().required(),
   }),
 });
 
-const googleLoginSchema = Joi.object({
+// Send OTP Schema
+const sendOtpSchema = Joi.object({
   body: Joi.object({
-    idToken: Joi.string().required(),
-    mobileNumber: Joi.string().trim().optional(),
+    email: Joi.string().email().required().lowercase(),
+    type: Joi.string().valid('REGISTER_EMAIL', 'REGISTER_MOBILE', 'FORGOT_PASSWORD_EMAIL', 'FORGOT_PASSWORD_MOBILE', 'CHANGE_EMAIL', 'CHANGE_MOBILE').default('REGISTER_EMAIL'),
   }),
 });
 
+// Verify OTP Schema
+const verifyOtpSchema = Joi.object({
+  body: Joi.object({
+    email: Joi.string().email().required().lowercase(),
+    code: Joi.string().length(6).required(),
+    type: Joi.string().valid('REGISTER_EMAIL', 'REGISTER_MOBILE', 'FORGOT_PASSWORD_EMAIL', 'FORGOT_PASSWORD_MOBILE', 'CHANGE_EMAIL', 'CHANGE_MOBILE').default('REGISTER_EMAIL'),
+  }),
+});
+
+// Forgot Password Schema - Send OTP
+const forgotPasswordSendSchema = Joi.object({
+  body: Joi.object({
+    email: Joi.string().email().required().lowercase(),
+  }),
+});
+
+// Forgot Password Schema - Verify OTP
+const forgotPasswordVerifySchema = Joi.object({
+  body: Joi.object({
+    email: Joi.string().email().required().lowercase(),
+    code: Joi.string().length(6).required(),
+  }),
+});
+
+// Forgot Password Schema - Reset Password
+const resetPasswordSchema = Joi.object({
+  body: Joi.object({
+    email: Joi.string().email().required().lowercase(),
+    newPassword: Joi.string().min(8).required(),
+    confirmPassword: Joi.string().required(),
+  }),
+});
+
+// Authentication endpoints
 router.post('/register', validateRequest(registerSchema), register);
-router.post('/verify-email-otp', validateRequest(verifyEmailSchema), verifyEmailOTP);
-router.post('/verify-mobile-otp', validateRequest(verifyMobileSchema), verifyMobileOTP);
 router.post('/login', validateRequest(loginSchema), login);
-router.post('/google-login', validateRequest(googleLoginSchema), googleLogin);
+router.post('/send-otp', validateRequest(sendOtpSchema), sendOtp);
+router.post('/verify-otp', validateRequest(verifyOtpSchema), verifyOtp);
+
+// Forgot Password endpoints
+router.post('/forgot-password/send-otp', validateRequest(forgotPasswordSendSchema), sendForgotPasswordOtp);
+router.post('/forgot-password/verify-otp', validateRequest(forgotPasswordVerifySchema), verifyForgotPasswordOtp);
+router.post('/forgot-password/reset', validateRequest(resetPasswordSchema), resetPasswordHandler);
+
+// Token management
 router.post('/refresh-token', refreshToken);
 router.post('/logout', logout);
-router.post('/guest', guestSession);
+// Guest session for anonymous backend access (used by frontend for live tokens)
+// NOTE: guest sessions removed — no /guest route
+
+// Google OAuth routes
+router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+router.get('/google/callback', 
+  passport.authenticate('google', { session: false }),
+  googleAuthCallback
+);
 
 module.exports = router;
+

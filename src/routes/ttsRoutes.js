@@ -1,9 +1,10 @@
 const express = require('express');
+const authMiddleware = require('../middleware/authMiddleware');
 const { streamElevenLabsSpeech } = require('../services/elevenLabsService');
 
 const router = express.Router();
 
-router.post('/preview', async (req, res) => {
+router.post('/preview', authMiddleware, async (req, res) => {
   const text = String(req.body && req.body.text ? req.body.text : '').trim();
   if (!text) {
     res.status(400).json({ error: 'Text is required.' });

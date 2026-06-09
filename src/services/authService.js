@@ -1,11 +1,51 @@
 const bcrypt = require('bcryptjs');
-const { OAuth2Client } = require('google-auth-library');
 const UserModel = require('../models/User');
+const OTPModel = require('../models/OTP');
 const SessionModel = require('../models/Session');
 const { generateAccessToken, generateRefreshToken, hashToken } = require('./tokenService');
+const otpService = require('./otpService');
 const { env } = require('../config/env');
 
-const googleClient = new OAuth2Client(env.googleClientId || '');
+// PRODUCTION RULES:
+// 1. Only @gmail.com accounts are allowed
+// 2. Reject Google Workspace, business, educational, and custom-domain emails
+// 3. OTP-based email verification
+// 4. Password-based login with email
+const ALLOWED_EMAIL_DOMAINS = ['gmail.com'];
+const DISALLOWED_EMAIL_PATTERNS = [
+  /@googlemail\.com$/,
+  /@google\.com$/,
+  /@gapps\.[a-z]+$/,
+  /@collegeName\..*\.edu$/,
+  /@.*\.edu$/,
+  /@.*\.ac\.uk$/,
+  /@.*\.school$/,
+  /@.*\.gov$/,
+];
+
+function isValidGmailAccount(email) {
+  if (!email) return false;
+  const emailLower = email.toLowerCase();
+  const domain = emailLower.split('@')[1];
+  
+  // Check if domain is in allowed list
+  if (!ALLOWED_EMAIL_DOMAINS.includes(domain)) {
+    return false;
+  }
+  
+  // Check against disallowed patterns
+  for (const pattern of DISALLOWED_EMAIL_PATTERNS) {
+    if (pattern.test(emailLower)) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+function generateOTPCode(length = 6) {
+  return String(Math.floor(Math.random() * Math.pow(10, length))).padStart(length, '0');
+}
 
 async function hashPassword(password) {
   return bcrypt.hash(password, 12);
@@ -15,138 +55,209 @@ async function comparePassword(password, hash) {
   return bcrypt.compare(password, hash);
 }
 
-async function createUser({ firstName, lastName, email, password, mobileNumber, googleId, profilePicture, mode = 'registered' }) {
-  const existingEmail = email ? await UserModel.findOne({ email: email.toLowerCase() }) : null;
+// ============= REGISTRATION FLOW =============
+async function registerUser({ firstName, lastName, email, password, mobileNumber }) {
+  // Validate input
+  if (!email || !password) {
+    throw new Error('Email and password are required.');
+  }
+  
+  if (!firstName || !lastName) {
+    throw new Error('First name and last name are required.');
+  }
+  
+  // Validate Gmail account
+  if (!isValidGmailAccount(email)) {
+    throw new Error('Only @gmail.com email accounts are allowed. Please use a Gmail account to register.');
+  }
+  
+  const normalizedEmail = email.toLowerCase();
+  
+  // Check if email already exists
+  const existingEmail = await UserModel.findOne({ email: normalizedEmail });
   if (existingEmail) {
-    throw new Error('Email already in use.');
+    throw new Error('Email already registered. Please login instead.');
   }
-  const existingMobile = mobileNumber ? await UserModel.findOne({ mobileNumber }) : null;
-  if (existingMobile) {
-    throw new Error('Mobile number already in use.');
+  
+  // Check if mobile already exists
+  if (mobileNumber) {
+    const existingMobile = await UserModel.findOne({ mobileNumber });
+    if (existingMobile) {
+      throw new Error('Mobile number already registered.');
+    }
   }
-
-  const passwordHash = password ? await hashPassword(password) : undefined;
-  return UserModel.create({
+  
+  // Hash password
+  const passwordHash = await hashPassword(password);
+  
+  // Create user (not verified yet)
+  const user = await UserModel.create({
     firstName,
     lastName,
-    displayName: mode === 'guest' ? `Guest ${Math.floor(Math.random() * 10000)}` : `${firstName || ''} ${lastName || ''}`.trim(),
-    email: email?.toLowerCase(),
-    emailVerified: false,
-    mobileNumber,
+    displayName: `${firstName} ${lastName}`.trim(),
+    email: normalizedEmail,
+    emailVerified: false, // Will be verified via OTP
+    mobileNumber: mobileNumber || undefined,
     mobileVerified: false,
     passwordHash,
-    profilePicture,
-    googleId,
     role: 'user',
-    mode,
+    mode: 'registered',
   });
+  
+  // Generate and send OTP
+  const otp = await generateAndSendOTP(normalizedEmail, 'REGISTER_EMAIL');
+  
+  return { user: sanitizeUser(user), otpSent: true, message: 'Registration successful. OTP sent to your email.' };
 }
 
-async function findUserByEmail(email) {
-  return UserModel.findOne({ email: email.toLowerCase() });
+// ============= OTP FUNCTIONS =============
+async function generateAndSendOTP(email, type = 'REGISTER_EMAIL') {
+  // Validate Gmail
+  if (!isValidGmailAccount(email)) {
+    throw new Error('Only @gmail.com email accounts are allowed.');
+  }
+  
+  // Generate OTP code
+  const code = generateOTPCode(6);
+  
+  // Delete any existing OTP for this email
+  await OTPModel.deleteMany({ identifier: email.toLowerCase(), type });
+  
+  // Create new OTP
+  const otp = await OTPModel.create({
+    identifier: email.toLowerCase(),
+    code,
+    type,
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+  });
+  
+  // Send OTP via email using shared OTP service
+  try {
+    await otpService.sendOTP(email, type, code);
+  } catch (error) {
+    console.error('Failed to send OTP:', error);
+    throw new Error('Failed to send OTP. Please try again.');
+  }
+  
+  return otp;
 }
 
-async function findUserByMobile(mobileNumber) {
-  return UserModel.findOne({ mobileNumber });
+async function verifyOTP(email, code, type = 'REGISTER_EMAIL') {
+  const normalizedEmail = email.toLowerCase();
+  
+  // Find OTP
+  const otp = await OTPModel.findOne({
+    identifier: normalizedEmail,
+    code,
+    type,
+    expiresAt: { $gt: new Date() },
+    used: false,
+  });
+  
+  if (!otp) {
+    throw new Error('Invalid or expired OTP code.');
+  }
+  
+  // Mark as used
+  otp.used = true;
+  await otp.save();
+  
+  // For registration, mark email as verified
+  if (type === 'REGISTER_EMAIL') {
+    await UserModel.findOneAndUpdate(
+      { email: normalizedEmail },
+      { emailVerified: true },
+      { returnDocument: 'after' }
+    );
+  }
+  
+  return true;
 }
 
-async function findUserByGoogleId(googleId) {
-  return UserModel.findOne({ googleId });
+// ============= LOGIN FUNCTIONS =============
+async function loginWithEmailPassword(email, password) {
+  if (!email || !password) {
+    throw new Error('Email and password are required.');
+  }
+  
+  const normalizedEmail = email.toLowerCase();
+  
+  // Validate Gmail
+  if (!isValidGmailAccount(normalizedEmail)) {
+    throw new Error('Only @gmail.com email accounts are allowed.');
+  }
+  
+  // Find user
+  const user = await UserModel.findOne({ email: normalizedEmail });
+  if (!user) {
+    throw new Error('Invalid email or password.');
+  }
+  
+  // Check if account is locked
+  if (user.loginLockedUntil && user.loginLockedUntil > new Date()) {
+    throw new Error('Account is temporarily locked. Please try again later.');
+  }
+  
+  // Check if email is verified
+  if (!user.emailVerified) {
+    throw new Error('Email not verified. Please verify your email with the OTP sent to your email.');
+  }
+  
+  // Verify password
+  const passwordValid = await comparePassword(password, user.passwordHash);
+  if (!passwordValid) {
+    // Record failed attempt
+    user.failedLoginAttempts = (user.failedLoginAttempts || 0) + 1;
+    
+    // Lock account after 5 failed attempts
+    if (user.failedLoginAttempts >= 5) {
+      user.loginLockedUntil = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+    }
+    
+    await user.save();
+    throw new Error('Invalid email or password.');
+  }
+  
+  // Reset failed attempts on successful login
+  user.failedLoginAttempts = 0;
+  user.loginLockedUntil = null;
+  user.lastLogin = new Date();
+  await user.save();
+  
+  // Generate tokens
+  const accessToken = generateAccessToken({ sub: user._id });
+  const refreshToken = generateRefreshToken({ sub: user._id });
+  await createSession(user._id, refreshToken);
+  
+  return { user, accessToken, refreshToken };
 }
 
+// ============= SESSION FUNCTIONS =============
 async function createSession(userId, refreshToken, opts = {}) {
   const refreshTokenHash = hashToken(refreshToken);
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
   const session = await SessionModel.create({ userId, refreshTokenHash, expiresAt, ...opts });
   await UserModel.findByIdAndUpdate(userId, { refreshTokenHash }, { returnDocument: 'after' });
   return session;
 }
 
-async function loginWithEmail(email, password) {
-  const user = await findUserByEmail(email);
-  if (!user || !user.passwordHash) {
-    throw new Error('Invalid credentials');
-  }
-  const valid = await comparePassword(password, user.passwordHash);
-  if (!valid) {
-    throw new Error('Invalid credentials');
-  }
-  if (!user.emailVerified || !user.mobileVerified) {
-    throw new Error('Please verify email and mobile before logging in.');
-  }
-  const accessToken = generateAccessToken({ sub: user._id });
-  const refreshToken = generateRefreshToken({ sub: user._id });
-  await createSession(user._id, refreshToken);
-  return { user, accessToken, refreshToken };
-}
-
-async function loginWithGoogleToken(idToken, mobileNumber) {
-  if (!idToken) {
-    throw new Error('Google ID token is required.');
-  }
-
-  const ticket = await googleClient.verifyIdToken({ idToken, audience: env.googleClientId });
-  const payload = ticket.getPayload();
-  const googleId = payload.sub;
-  const email = payload.email?.toLowerCase();
-  const firstName = payload.given_name || payload.name?.split(' ')[0] || '';
-  const lastName = payload.family_name || payload.name?.split(' ').slice(1).join(' ') || '';
-
-  let user = await findUserByGoogleId(googleId);
-  if (!user && email) {
-    user = await findUserByEmail(email);
-  }
-
-  if (!user) {
-    user = await UserModel.create({
-      firstName,
-      lastName,
-      email,
-      emailVerified: true,
-      mobileNumber: mobileNumber || undefined,
-      mobileVerified: false,
-      googleId,
-      role: 'user',
-    });
-  } else {
-    user.googleId = googleId;
-    if (email) user.email = email;
-    if (firstName) user.firstName = firstName;
-    if (lastName) user.lastName = lastName;
-    await user.save();
-  }
-
-  if (!user.mobileVerified) {
-    return { user, pendingMobileVerification: true };
-  }
-
-  const accessToken = generateAccessToken({ sub: user._id });
-  const refreshToken = generateRefreshToken({ sub: user._id });
-  await createSession(user._id, refreshToken);
-  return { user, accessToken, refreshToken, pendingMobileVerification: false };
-}
-
-async function ensureGuestUser(userId) {
-  if (userId) {
-    const existing = await UserModel.findById(userId);
-    if (existing) return existing;
-  }
-  return createUser({ mode: 'guest' });
-}
-
 async function refreshSession(userId, refreshToken, userAgent, ip) {
   const refreshTokenHash = hashToken(refreshToken);
   const session = await SessionModel.findOne({ userId, refreshTokenHash, expiresAt: { $gt: new Date() } });
+  
   if (!session) {
     throw new Error('Refresh token invalid or expired.');
   }
+  
   const newRefreshToken = generateRefreshToken({ sub: userId });
   session.refreshTokenHash = hashToken(newRefreshToken);
   session.expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
   session.userAgent = userAgent;
   session.ip = ip;
   await session.save();
+  
   await UserModel.findByIdAndUpdate(userId, { refreshTokenHash: session.refreshTokenHash });
+  
   const accessToken = generateAccessToken({ sub: userId });
   return { accessToken, refreshToken: newRefreshToken };
 }
@@ -156,23 +267,224 @@ async function logout(userId, refreshToken) {
   await SessionModel.deleteOne({ userId, refreshTokenHash });
 }
 
-async function invalidateAllSessions(userId) {
-  await SessionModel.deleteMany({ userId });
-  await UserModel.findByIdAndUpdate(userId, { refreshTokenHash: null });
+// ============= UTILITY FUNCTIONS =============
+async function findUserByEmail(email) {
+  if (!email) return null;
+  return UserModel.findOne({ email: email.toLowerCase() });
+}
+
+async function findUserById(id) {
+  if (!id) return null;
+  return UserModel.findById(id);
+}
+
+function sanitizeUser(user) {
+  if (!user) return null;
+  const obj = user.toObject ? user.toObject() : user;
+  const {
+    passwordHash,
+    refreshTokenHash,
+    __v,
+    googleEmail,
+    failedOtpAttempts,
+    accountLockedUntil,
+    failedLoginAttempts,
+    loginLockedUntil,
+    ...safe
+  } = obj;
+  return safe;
+}
+
+// ============= FORGOT PASSWORD FUNCTIONS =============
+async function sendForgotPasswordOTP(email) {
+  const normalizedEmail = email.toLowerCase();
+  
+  // Validate Gmail
+  if (!isValidGmailAccount(normalizedEmail)) {
+    throw new Error('Only @gmail.com email accounts are allowed.');
+  }
+  
+  // Find user by email
+  const user = await UserModel.findOne({ email: normalizedEmail });
+  if (!user) {
+    // Don't reveal if email exists (security best practice)
+    throw new Error('If this email is registered, you will receive password reset instructions.');
+  }
+  
+  // Generate OTP code
+  const code = generateOTPCode(6);
+  
+  // Delete any existing OTP for this email
+  await OTPModel.deleteMany({ identifier: normalizedEmail, type: 'FORGOT_PASSWORD_EMAIL' });
+  
+  // Create new OTP
+  const otp = await OTPModel.create({
+    identifier: normalizedEmail,
+    code,
+    type: 'FORGOT_PASSWORD_EMAIL',
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
+  });
+  
+  // Send OTP via email
+  try {
+    await otpService.sendOTP(normalizedEmail, 'FORGOT_PASSWORD_EMAIL', code);
+  } catch (error) {
+    console.error('Failed to send OTP:', error);
+    throw new Error('Failed to send OTP. Please try again.');
+  }
+  
+  return otp;
+}
+
+async function verifyForgotPasswordOTP(email, code) {
+  const normalizedEmail = email.toLowerCase();
+  
+  // Find OTP
+  const otp = await OTPModel.findOne({
+    identifier: normalizedEmail,
+    code,
+    type: 'FORGOT_PASSWORD_EMAIL',
+    expiresAt: { $gt: new Date() },
+    used: false,
+  });
+  
+  if (!otp) {
+    throw new Error('Invalid or expired OTP code.');
+  }
+  
+  // Mark as used
+  otp.used = true;
+  await otp.save();
+  
+  return true;
+}
+
+async function resetPassword(email, newPassword) {
+  if (!email || !newPassword) {
+    throw new Error('Email and password are required.');
+  }
+  
+  if (newPassword.length < 8) {
+    throw new Error('Password must be at least 8 characters long.');
+  }
+  
+  const normalizedEmail = email.toLowerCase();
+  
+  // Find user
+  const user = await UserModel.findOne({ email: normalizedEmail });
+  if (!user) {
+    throw new Error('User not found.');
+  }
+  
+  // Hash new password
+  const newPasswordHash = await hashPassword(newPassword);
+  
+  // Update password
+  user.passwordHash = newPasswordHash;
+  user.failedLoginAttempts = 0;
+  user.loginLockedUntil = null;
+  await user.save();
+  
+  return true;
+}
+
+// ============= GOOGLE OAUTH =============
+async function loginWithGoogle({ googleId, email, firstName, lastName, profilePicture, googleEmail }) {
+  if (!googleId || !email) {
+    throw new Error('Google ID and email are required.');
+  }
+
+  const normalizedEmail = email.toLowerCase();
+  
+  try {
+    // Find user by googleId first
+    let user = await UserModel.findOne({ googleId });
+    
+    if (user) {
+      // User exists - update last login
+      user.lastLogin = new Date();
+      await user.save();
+      
+      // Generate tokens
+      const accessToken = generateAccessToken({ sub: user._id });
+      const refreshToken = generateRefreshToken({ sub: user._id });
+      await createSession(user._id, refreshToken);
+      
+      return {
+        user: sanitizeUser(user),
+        accessToken,
+        token: accessToken,
+        refreshToken,
+        message: 'Logged in successfully with Google.',
+      };
+    }
+    
+    // Check if email already exists (from email/password registration)
+    const existingUser = await UserModel.findOne({ email: normalizedEmail });
+    if (existingUser && !existingUser.googleId) {
+      throw new Error('This email is already registered with email/password. Please login with email instead.');
+    }
+    
+    // Create new user
+    user = await UserModel.create({
+      firstName: firstName || '',
+      lastName: lastName || '',
+      displayName: `${firstName || ''} ${lastName || ''}`.trim(),
+      email: normalizedEmail,
+      emailVerified: true, // Google verifies email
+      googleId,
+      googleEmail: googleEmail || normalizedEmail,
+      profilePicture: profilePicture || undefined,
+      passwordHash: await hashPassword(Math.random().toString(36).slice(-16)), // Random password for OAuth
+      role: 'user',
+      mode: 'registered',
+    });
+    
+    // Generate tokens
+    const accessToken = generateAccessToken({ sub: user._id });
+    const refreshToken = generateRefreshToken({ sub: user._id });
+    await createSession(user._id, refreshToken);
+    
+    return {
+      user: sanitizeUser(user),
+      accessToken,
+      token: accessToken,
+      refreshToken,
+      message: 'Account created and logged in successfully with Google.',
+    };
+  } catch (error) {
+    console.error('Google login error:', error);
+    throw error;
+  }
 }
 
 module.exports = {
-  hashPassword,
-  comparePassword,
-  createUser,
-  ensureGuestUser,
-  findUserByEmail,
-  findUserByMobile,
-  findUserByGoogleId,
+  // Registration
+  registerUser,
+  
+  // OTP
+  generateAndSendOTP,
+  verifyOTP,
+  
+  // Login
+  loginWithEmailPassword,
+  loginWithGoogle,
+  
+  // Forgot Password
+  sendForgotPasswordOTP,
+  verifyForgotPasswordOTP,
+  resetPassword,
+  
+  // Session
   createSession,
-  loginWithEmail,
-  loginWithGoogleToken,
   refreshSession,
   logout,
-  invalidateAllSessions,
+  
+  // Utility
+  findUserByEmail,
+  findUserById,
+  sanitizeUser,
+  isValidGmailAccount,
+  hashPassword,
+  comparePassword,
 };
