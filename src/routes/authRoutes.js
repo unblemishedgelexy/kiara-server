@@ -93,7 +93,18 @@ router.post('/logout', logout);
 // NOTE: guest sessions removed — no /guest route
 
 // Google OAuth routes
-router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'], session: false }));
+router.get('/google', (req, res, next) => {
+  // Preserve client information across OAuth round-trip using state
+  try {
+    const client = req.query.client || req.query.clientType || null;
+    const stateObj = { client };
+    const state = Buffer.from(JSON.stringify(stateObj)).toString('base64');
+    return passport.authenticate('google', { scope: ['profile', 'email'], session: false, state })(req, res, next);
+  } catch (e) {
+    return passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
+  }
+});
+
 router.get('/google/callback', 
   passport.authenticate('google', { session: false }),
   googleAuthCallback

@@ -51,6 +51,7 @@ const env = {
     defaultNativeClientOriginSchemes,
     readList('NATIVE_CLIENT_ORIGIN_SCHEMES', [])
   ),
+  nativeClientRedirectUrl: readEnv('NATIVE_CLIENT_REDIRECT_URL', 'capacitor://localhost'),
   elevenLabsApiKey: readEnv('ELEVENLABS_API_KEY'),
   elevenLabsVoiceId: readEnv('ELEVENLABS_VOICE_ID'),
   geminiApiKey: readEnv('GEMINI_API_KEY'),

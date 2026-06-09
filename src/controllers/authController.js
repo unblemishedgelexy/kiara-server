@@ -288,7 +288,24 @@ async function googleAuthCallback(req, res) {
       });
     }
 
-    const clientUrl = env.clientOrigins[0] || 'http://localhost:5173';
+    // Try to read client information from OAuth state (preferred), fallback to query param
+    let clientRequestType = null;
+    if (req.query && req.query.state) {
+      try {
+        const decoded = Buffer.from(String(req.query.state), 'base64').toString('utf8');
+        const parsed = JSON.parse(decoded);
+        clientRequestType = parsed?.client || parsed?.clientType || null;
+      } catch (e) {
+        // ignore JSON/state parse errors
+      }
+    }
+
+    if (!clientRequestType) {
+      clientRequestType = Array.isArray(req.query.client) ? req.query.client[0] : req.query.client;
+    }
+
+    const useNativeRedirect = clientRequestType === 'capacitor' || clientRequestType === 'mobile';
+    const clientUrl = useNativeRedirect ? env.nativeClientRedirectUrl : env.clientOrigins[0] || 'http://localhost:5173';
     const redirectUrl = `${clientUrl}/auth/google/callback?accessToken=${encodeURIComponent(result.accessToken)}&refreshToken=${encodeURIComponent(result.refreshToken)}`;
     res.redirect(redirectUrl);
   } catch (error) {
