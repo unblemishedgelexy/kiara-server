@@ -277,6 +277,10 @@ async function googleAuthCallback(req, res) {
       });
     }
 
+    if (!result.accessToken || !result.refreshToken) {
+      throw new Error('Google login did not generate valid authentication tokens.');
+    }
+
     // Try to read client information from OAuth state (preferred), fallback to query param
     let clientRequestType = null;
     if (req.query && req.query.state) {
@@ -285,7 +289,7 @@ async function googleAuthCallback(req, res) {
         const parsed = JSON.parse(decoded);
         clientRequestType = parsed?.client || parsed?.clientType || null;
       } catch (e) {
-        // ignore JSON/state parse errors
+        console.warn('[authController] Failed to parse OAuth state', e);
       }
     }
 
@@ -296,6 +300,16 @@ async function googleAuthCallback(req, res) {
     const useNativeRedirect = clientRequestType === 'capacitor' || clientRequestType === 'mobile';
     const clientUrl = useNativeRedirect ? env.nativeClientRedirectUrl : env.clientOrigins[0] || 'http://localhost:5173';
     const redirectUrl = `${clientUrl}/auth/google/callback?accessToken=${encodeURIComponent(result.accessToken)}&refreshToken=${encodeURIComponent(result.refreshToken)}`;
+    const redirectPath = `${clientUrl}/auth/google/callback`;
+
+    console.debug('[authController] Redirecting Google callback', {
+      clientRequestType,
+      clientUrl,
+      redirectPath,
+      accessToken: !!result.accessToken,
+      refreshToken: !!result.refreshToken,
+    });
+
     res.redirect(redirectUrl);
   } catch (error) {
     console.error('Google callback error:', error);

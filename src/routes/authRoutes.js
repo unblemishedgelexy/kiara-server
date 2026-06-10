@@ -101,12 +101,15 @@ router.get('/google', (req, res, next) => {
     const stateObj = { client };
     const state = Buffer.from(JSON.stringify(stateObj)).toString('base64');
 
+    console.debug('[authRoutes] Starting Google OAuth flow', { client, state });
+
     return passport.authenticate('google', {
       scope: ['profile', 'email'],
       session: false,
       state,
     })(req, res, next);
   } catch (e) {
+    console.warn('[authRoutes] Google OAuth state creation failed', e);
     return passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
   }
 });
