@@ -95,20 +95,16 @@ router.post('/logout', logout);
 
 // Google OAuth routes
 router.get('/google', (req, res, next) => {
-  // Preserve client information across OAuth round-trip using state and callbackURL
+  // Preserve client information across OAuth round-trip using state
   try {
     const client = req.query.client || req.query.clientType || null;
     const stateObj = { client };
     const state = Buffer.from(JSON.stringify(stateObj)).toString('base64');
-    const callbackURL = client
-      ? `${env.serverUrl}/auth/google/callback?client=${encodeURIComponent(String(client))}`
-      : undefined;
 
     return passport.authenticate('google', {
       scope: ['profile', 'email'],
       session: false,
       state,
-      ...(callbackURL ? { callbackURL } : {}),
     })(req, res, next);
   } catch (e) {
     return passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
