@@ -3,6 +3,7 @@ const UserModel = require('../models/User');
 const { verifyAccessToken, verifyRefreshToken, generateAccessToken, generateRefreshToken } = require('../services/tokenService');
 const { env, isProductionEnv } = require('../config/env');
 const { extractBearerToken } = require('../utils/authCookies');
+const { OAuth2Client } = require('google-auth-library');
 
 
 function buildAuthPayload(user, accessToken, refreshToken) {
@@ -321,6 +322,90 @@ async function googleAuthCallback(req, res) {
   }
 }
 
-// Guest sessions removed — functionality intentionally disabled.
+// ============= NATIVE GOOGLE SIGN-IN (Mobile) =============
+async function googleSignInHandler(req, res, next) {
+  try {
+    const { idToken, serverAuthCode } = req.body;
 
-module.exports = { register, sendOtp, verifyOtp, login, refreshToken, logout, sendForgotPasswordOtp, verifyForgotPasswordOtp, resetPasswordHandler, googleAuthCallback };
+    if (!idToken) {
+      return res.status(400).json({ success: false, message: 'ID token is required.' });
+    }
+
+    // Verify ID token with Google
+    const client = new OAuth2Client(env.googleClientId);
+    let ticket;
+    
+    try {
+      ticket = await client.verifyIdToken({
+        idToken,
+        audience: env.googleClientId,
+      });
+    } catch (error) {
+      console.error('[authController] Google token verification failed:', error.message);
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Google authentication failed. Invalid or expired token.' 
+      });
+    }
+
+    const payload = ticket.getPayload();
+    
+    if (!payload) {
+      return res.status(401).json({ success: false, message: 'Failed to extract Google profile data.' });
+    }
+
+    // Extract user info from Google token
+    const googleId = payload.sub;
+    const email = payload.email;
+    const firstName = payload.given_name || '';
+    const lastName = payload.family_name || '';
+    const profilePicture = payload.picture || '';
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email not found in Google profile.' });
+    }
+
+    console.debug('[authController] Google sign-in verified', { email, googleId });
+
+    // Login or register with Google
+    const result = await authService.loginWithGoogle({
+      googleId,
+      email,
+      firstName,
+      lastName,
+      profilePicture,
+      googleEmail: email,
+    });
+
+    if (!result.accessToken || !result.refreshToken) {
+      throw new Error('Failed to generate authentication tokens.');
+    }
+
+    console.debug('[authController] Google sign-in successful', { email, isNewUser: !result.existingUser });
+
+    res.json({
+      success: true,
+      message: result.message || 'Logged in with Google successfully.',
+      ...buildAuthPayload(result.user, result.accessToken, result.refreshToken),
+    });
+  } catch (error) {
+    console.error('[authController] Google sign-in handler error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Google sign-in failed.',
+    });
+  }
+}
+
+module.exports = { 
+  register, 
+  sendOtp, 
+  verifyOtp, 
+  login, 
+  refreshToken, 
+  logout, 
+  sendForgotPasswordOtp, 
+  verifyForgotPasswordOtp, 
+  resetPasswordHandler, 
+  googleSignInHandler,
+};

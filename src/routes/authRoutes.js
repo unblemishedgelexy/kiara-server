@@ -3,8 +3,18 @@ const Joi = require('joi');
 const validateRequest = require('../middleware/validateRequest');
 const authMiddleware = require('../middleware/authMiddleware');
 const { env } = require('../config/env');
-const { register, sendOtp, verifyOtp, login, refreshToken, logout, sendForgotPasswordOtp, verifyForgotPasswordOtp, resetPasswordHandler, googleAuthCallback } = require('../controllers/authController');
-const passport = require('passport');
+const { 
+  register, 
+  sendOtp, 
+  verifyOtp, 
+  login, 
+  refreshToken, 
+  logout, 
+  sendForgotPasswordOtp, 
+  verifyForgotPasswordOtp, 
+  resetPasswordHandler,
+  googleSignInHandler,
+} = require('../controllers/authController');
 
 const router = express.Router();
 
@@ -76,6 +86,14 @@ const resetPasswordSchema = Joi.object({
   }),
 });
 
+// Google Native Sign-In Schema
+const googleSignInSchema = Joi.object({
+  body: Joi.object({
+    idToken: Joi.string().required(),
+    serverAuthCode: Joi.string().optional(),
+  }),
+});
+
 // Authentication endpoints
 router.post('/register', validateRequest(registerSchema), register);
 router.post('/login', validateRequest(loginSchema), login);
@@ -90,34 +108,9 @@ router.post('/forgot-password/reset', validateRequest(resetPasswordSchema), rese
 // Token management
 router.post('/refresh-token', refreshToken);
 router.post('/logout', logout);
-// Guest session for anonymous backend access (used by frontend for live tokens)
-// NOTE: guest sessions removed — no /guest route
 
-// Google OAuth routes
-router.get('/google', (req, res, next) => {
-  // Preserve client information across OAuth round-trip using state
-  try {
-    const client = req.query.client || req.query.clientType || null;
-    const stateObj = { client };
-    const state = Buffer.from(JSON.stringify(stateObj)).toString('base64');
-
-    console.debug('[authRoutes] Starting Google OAuth flow', { client, state });
-
-    return passport.authenticate('google', {
-      scope: ['profile', 'email'],
-      session: false,
-      state,
-    })(req, res, next);
-  } catch (e) {
-    console.warn('[authRoutes] Google OAuth state creation failed', e);
-    return passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
-  }
-});
-
-router.get('/google/callback', 
-  passport.authenticate('google', { session: false }),
-  googleAuthCallback
-);
+// Native Google Sign-In (Mobile/Capacitor)
+router.post('/google/sign-in', validateRequest(googleSignInSchema), googleSignInHandler);
 
 module.exports = router;
 

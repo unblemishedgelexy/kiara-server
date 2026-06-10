@@ -1,7 +1,6 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const passport = require('./config/passport');
 const authRoutes = require('./routes/authRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const passwordRoutes = require('./routes/passwordRoutes');
@@ -49,8 +48,6 @@ const createApp = () => {
 
   app.use(bodyParser.json());
   app.use(bodyParser.urlencoded({ extended: true }));
-
-  app.use(passport.initialize());
 
   app.use('/api/auth', authRoutes);
   app.use('/auth', authRoutes);
