@@ -50,8 +50,6 @@ const env = {
   jwtSecret: readEnv('JWT_SECRET', 'dev-only-change-me'),
   jwtAccessSecret: readEnv('JWT_ACCESS_SECRET', ''),
   jwtRefreshSecret: readEnv('JWT_REFRESH_SECRET', ''),
-  googleClientId: readEnv('GOOGLE_CLIENT_ID', ''),
-  googleClientSecret: readEnv('GOOGLE_CLIENT_SECRET', ''),
   serverUrl: readEnv('SERVER_URL', 'http://localhost:4000'),
   emailFrom: readEnv('EMAIL_FROM', 'no-reply@example.com'),
   emailTransportUrl: readEnv('EMAIL_TRANSPORT_URL', ''),

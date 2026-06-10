@@ -13,7 +13,6 @@ const {
   sendForgotPasswordOtp, 
   verifyForgotPasswordOtp, 
   resetPasswordHandler,
-  googleSignInHandler,
 } = require('../controllers/authController');
 
 const router = express.Router();
@@ -86,14 +85,6 @@ const resetPasswordSchema = Joi.object({
   }),
 });
 
-// Google Native Sign-In Schema
-const googleSignInSchema = Joi.object({
-  body: Joi.object({
-    idToken: Joi.string().required(),
-    serverAuthCode: Joi.string().optional(),
-  }),
-});
-
 // Authentication endpoints
 router.post('/register', validateRequest(registerSchema), register);
 router.post('/login', validateRequest(loginSchema), login);
@@ -108,9 +99,6 @@ router.post('/forgot-password/reset', validateRequest(resetPasswordSchema), rese
 // Token management
 router.post('/refresh-token', refreshToken);
 router.post('/logout', logout);
-
-// Native Google Sign-In (Mobile/Capacitor)
-router.post('/google/sign-in', validateRequest(googleSignInSchema), googleSignInHandler);
 
 module.exports = router;
 
