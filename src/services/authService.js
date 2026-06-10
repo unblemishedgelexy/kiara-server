@@ -267,6 +267,12 @@ async function logout(userId, refreshToken) {
   await SessionModel.deleteOne({ userId, refreshTokenHash });
 }
 
+async function invalidateAllSessions(userId) {
+  if (!userId) return;
+  await SessionModel.deleteMany({ userId });
+  await UserModel.findByIdAndUpdate(userId, { refreshTokenHash: null });
+}
+
 // ============= UTILITY FUNCTIONS =============
 async function findUserByEmail(email) {
   if (!email) return null;
@@ -479,6 +485,7 @@ module.exports = {
   createSession,
   refreshSession,
   logout,
+  invalidateAllSessions,
   
   // Utility
   findUserByEmail,

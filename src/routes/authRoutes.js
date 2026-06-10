@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const validateRequest = require('../middleware/validateRequest');
 const authMiddleware = require('../middleware/authMiddleware');
+const { env } = require('../config/env');
 const { register, sendOtp, verifyOtp, login, refreshToken, logout, sendForgotPasswordOtp, verifyForgotPasswordOtp, resetPasswordHandler, googleAuthCallback } = require('../controllers/authController');
 const passport = require('passport');
 
@@ -94,12 +95,21 @@ router.post('/logout', logout);
 
 // Google OAuth routes
 router.get('/google', (req, res, next) => {
-  // Preserve client information across OAuth round-trip using state
+  // Preserve client information across OAuth round-trip using state and callbackURL
   try {
     const client = req.query.client || req.query.clientType || null;
     const stateObj = { client };
     const state = Buffer.from(JSON.stringify(stateObj)).toString('base64');
-    return passport.authenticate('google', { scope: ['profile', 'email'], session: false, state })(req, res, next);
+    const callbackURL = client
+      ? `${env.serverUrl}/auth/google/callback?client=${encodeURIComponent(String(client))}`
+      : undefined;
+
+    return passport.authenticate('google', {
+      scope: ['profile', 'email'],
+      session: false,
+      state,
+      ...(callbackURL ? { callbackURL } : {}),
+    })(req, res, next);
   } catch (e) {
     return passport.authenticate('google', { scope: ['profile', 'email'], session: false })(req, res, next);
   }

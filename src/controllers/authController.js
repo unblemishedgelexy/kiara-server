@@ -155,18 +155,7 @@ async function refreshToken(req, res, next) {
 // ============= LOGOUT =============
 async function logout(req, res, next) {
   try {
-    const bodyRefreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : null;
-    const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string'
-      ? req.headers['x-refresh-token']
-      : null;
-    const refreshToken = bodyRefreshToken || headerRefreshToken;
-
-    if (refreshToken) {
-      const decoded = verifyRefreshToken(refreshToken);
-      await authService.logout(decoded.sub, refreshToken);
-    }
-
-    res.json({ success: true, message: 'Logged out successfully' });
+    res.json({ success: true, message: 'Logout is disabled; session preserved.' });
   } catch (err) {
     next(err);
   }
