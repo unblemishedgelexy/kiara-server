@@ -58,6 +58,16 @@ const env = {
   twilioAuthToken: readEnv('TWILIO_AUTH_TOKEN', ''),
   twilioFromNumber: readEnv('TWILIO_FROM_NUMBER', ''),
   cookieDomain: readEnv('COOKIE_DOMAIN', ''),
+  googleClientId: readEnv('GOOGLE_CLIENT_ID', ''),
+  googleClientSecret: readEnv('GOOGLE_CLIENT_SECRET', ''),
+  googleOAuthRedirectUri: readEnv('GOOGLE_OAUTH_REDIRECT_URI', `${process.env.SERVER_URL || 'http://localhost:4000'}/api/auth/google/callback`),
+  googleAuthAllowedReturnUrls: mergeLists(
+    readList('ALLOWED_OAUTH_RETURN_URLS', []),
+    [
+      readEnv('APP_DEEP_LINK_URI', 'com.kiara.ai://auth-complete'),
+      readEnv('WEB_AUTH_RETURN_URL', 'http://localhost:5173/auth/callback'),
+    ]
+  ),
   aesSecret: readEnv('AES_SECRET', 'aes-secret-32-bytes-length!!'),
   mongoUri: readEnv('MONGODB_URI', 'mongodb://127.0.0.1:27017/kiara_ai'),
   nodeEnv: readEnv('NODE_ENV', 'development'),

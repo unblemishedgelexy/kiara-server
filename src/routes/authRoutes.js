@@ -13,6 +13,8 @@ const {
   sendForgotPasswordOtp, 
   verifyForgotPasswordOtp, 
   resetPasswordHandler,
+  getGoogleAuthUrl,
+  handleGoogleCallback,
 } = require('../controllers/authController');
 
 const router = express.Router();
@@ -88,6 +90,8 @@ const resetPasswordSchema = Joi.object({
 // Authentication endpoints
 router.post('/register', validateRequest(registerSchema), register);
 router.post('/login', validateRequest(loginSchema), login);
+router.get('/google/url', validateRequest(Joi.object({ query: Joi.object({ redirectUri: Joi.string().required() }).unknown(true) })), getGoogleAuthUrl);
+router.get('/google/callback', handleGoogleCallback);
 router.post('/send-otp', validateRequest(sendOtpSchema), sendOtp);
 router.post('/verify-otp', validateRequest(verifyOtpSchema), verifyOtp);
 

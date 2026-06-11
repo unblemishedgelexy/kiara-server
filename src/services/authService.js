@@ -401,21 +401,23 @@ async function loginWithGoogle({ googleId, email, firstName, lastName, profilePi
   }
 
   const normalizedEmail = email.toLowerCase();
-  
+
   try {
     // Find user by googleId first
     let user = await UserModel.findOne({ googleId });
-    
+
     if (user) {
-      // User exists - update last login
+      // User exists - update last login and profile data
       user.lastLogin = new Date();
+      user.emailVerified = true;
+      user.googleEmail = googleEmail || normalizedEmail;
+      user.profilePicture = profilePicture || user.profilePicture;
       await user.save();
-      
-      // Generate tokens
+
       const accessToken = generateAccessToken({ sub: user._id });
       const refreshToken = generateRefreshToken({ sub: user._id });
       await createSession(user._id, refreshToken);
-      
+
       return {
         user: sanitizeUser(user),
         accessToken,
@@ -424,33 +426,55 @@ async function loginWithGoogle({ googleId, email, firstName, lastName, profilePi
         message: 'Logged in successfully with Google.',
       };
     }
-    
-    // Check if email already exists (from email/password registration)
+
+    // Link Google to existing user by email if possible
     const existingUser = await UserModel.findOne({ email: normalizedEmail });
-    if (existingUser && !existingUser.googleId) {
-      throw new Error('This email is already registered with email/password. Please login with email instead.');
+    if (existingUser) {
+      if (existingUser.googleId && existingUser.googleId !== googleId) {
+        throw new Error('This email is already linked to a different Google account.');
+      }
+
+      existingUser.googleId = googleId;
+      existingUser.googleEmail = googleEmail || normalizedEmail;
+      existingUser.emailVerified = true;
+      existingUser.profilePicture = profilePicture || existingUser.profilePicture;
+      existingUser.firstName = existingUser.firstName || firstName || existingUser.firstName;
+      existingUser.lastName = existingUser.lastName || lastName || existingUser.lastName;
+      existingUser.displayName = existingUser.displayName || `${existingUser.firstName || ''} ${existingUser.lastName || ''}`.trim();
+      await existingUser.save();
+
+      const accessToken = generateAccessToken({ sub: existingUser._id });
+      const refreshToken = generateRefreshToken({ sub: existingUser._id });
+      await createSession(existingUser._id, refreshToken);
+
+      return {
+        user: sanitizeUser(existingUser),
+        accessToken,
+        token: accessToken,
+        refreshToken,
+        message: 'Google account linked and signed in successfully.',
+      };
     }
-    
-    // Create new user
+
+    // Create a new user for this Google account
     user = await UserModel.create({
       firstName: firstName || '',
       lastName: lastName || '',
       displayName: `${firstName || ''} ${lastName || ''}`.trim(),
       email: normalizedEmail,
-      emailVerified: true, // Google verifies email
+      emailVerified: true,
       googleId,
       googleEmail: googleEmail || normalizedEmail,
       profilePicture: profilePicture || undefined,
-      passwordHash: await hashPassword(Math.random().toString(36).slice(-16)), // Random password for OAuth
+      passwordHash: await hashPassword(Math.random().toString(36).slice(-16)),
       role: 'user',
       mode: 'registered',
     });
-    
-    // Generate tokens
+
     const accessToken = generateAccessToken({ sub: user._id });
     const refreshToken = generateRefreshToken({ sub: user._id });
     await createSession(user._id, refreshToken);
-    
+
     return {
       user: sanitizeUser(user),
       accessToken,

@@ -3,6 +3,7 @@ const UserModel = require('../models/User');
 const { verifyAccessToken, verifyRefreshToken, generateAccessToken, generateRefreshToken } = require('../services/tokenService');
 const { env, isProductionEnv } = require('../config/env');
 const { extractBearerToken } = require('../utils/authCookies');
+const googleOAuthService = require('../services/googleOAuthService');
 
 
 function buildAuthPayload(user, accessToken, refreshToken) {
@@ -123,6 +124,64 @@ async function login(req, res, next) {
   }
 }
 
+async function getGoogleAuthUrl(req, res, next) {
+  try {
+    const redirectUri = typeof req.query?.redirectUri === 'string' ? req.query.redirectUri.trim() : '';
+    if (!redirectUri) {
+      return res.status(400).json({ success: false, message: 'redirectUri is required.' });
+    }
+
+    const result = await googleOAuthService.createAuthRequest(redirectUri);
+    res.json({ success: true, authUrl: result.authUrl });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message || 'Unable to create Google auth URL.' });
+  }
+}
+
+async function handleGoogleCallback(req, res, next) {
+  try {
+    const { code, state, error, error_description: errorDescription } = req.query;
+
+    if (error) {
+      const message = typeof errorDescription === 'string' ? errorDescription : 'Google authentication was cancelled or denied.';
+      return res.status(400).json({ success: false, message });
+    }
+
+    if (!code || !state) {
+      return res.status(400).json({ success: false, message: 'Missing code or state in callback response.' });
+    }
+
+    const authState = await googleOAuthService.consumeAuthState(String(state));
+    if (!authState) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired OAuth state.' });
+    }
+
+    const tokenPayload = await googleOAuthService.exchangeCodeForTokens(String(code), authState.codeVerifier);
+    const idTokenPayload = await googleOAuthService.verifyIdToken(tokenPayload.id_token);
+
+    const googleUser = {
+      googleId: idTokenPayload.sub,
+      email: idTokenPayload.email,
+      firstName: idTokenPayload.given_name,
+      lastName: idTokenPayload.family_name,
+      profilePicture: idTokenPayload.picture,
+      googleEmail: idTokenPayload.email,
+    };
+
+    const result = await authService.loginWithGoogle(googleUser);
+
+    const redirectTarget = new URL(authState.returnUrl);
+    redirectTarget.searchParams.set('accessToken', result.accessToken);
+    redirectTarget.searchParams.set('refreshToken', result.refreshToken);
+    redirectTarget.searchParams.set('token', result.accessToken);
+
+    return res.redirect(303, redirectTarget.toString());
+  } catch (error) {
+    console.error('[authController] Google callback error:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Google callback failed.' });
+  }
+}
+
 // ============= TOKEN REFRESH =============
 async function refreshToken(req, res, next) {
   try {
@@ -155,7 +214,20 @@ async function refreshToken(req, res, next) {
 // ============= LOGOUT =============
 async function logout(req, res, next) {
   try {
-    res.json({ success: true, message: 'Logout is disabled; session preserved.' });
+    const bodyRefreshToken = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : null;
+    const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string' ? req.headers['x-refresh-token'] : null;
+    const refreshToken = bodyRefreshToken || headerRefreshToken;
+
+    if (refreshToken) {
+      try {
+        const decoded = verifyRefreshToken(refreshToken);
+        await authService.logout(decoded.sub, refreshToken);
+      } catch {
+        // ignore invalid refresh token during logout
+      }
+    }
+
+    res.json({ success: true, message: 'Logged out successfully.' });
   } catch (err) {
     next(err);
   }
@@ -245,6 +317,8 @@ module.exports = {
   sendOtp, 
   verifyOtp, 
   login, 
+  getGoogleAuthUrl, 
+  handleGoogleCallback, 
   refreshToken, 
   logout, 
   sendForgotPasswordOtp, 
