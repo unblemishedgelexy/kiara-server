@@ -1,11 +1,36 @@
 const nodemailer = require("nodemailer");
 const { env } = require("../config/env");
 
-const transporter = nodemailer.createTransport(
-  env.emailTransportUrl
-    ? env.emailTransportUrl
-    : { sendmail: true }
-);
+function createTransport() {
+  let transportConfig;
+  if (env.smtpHost && env.smtpUser && env.smtpPass) {
+    transportConfig = {
+      host: env.smtpHost,
+      port: env.smtpPort,
+      secure: env.smtpSecure,
+      auth: {
+        user: env.smtpUser,
+        pass: env.smtpPass,
+      },
+    };
+    console.log(`Using explicit SMTP transport: ${env.smtpHost}:${env.smtpPort} secure=${env.smtpSecure}`);
+  } else {
+    transportConfig = { sendmail: true };
+    console.warn('No SMTP credentials configured. Falling back to sendmail transport.');
+  }
+
+  const transport = nodemailer.createTransport(transportConfig);
+
+  transport.verify().then(() => {
+    console.log('Email transport verified successfully.');
+  }).catch((error) => {
+    console.error('Email transport verification failed:', error && error.message ? error.message : error);
+  });
+
+  return transport;
+}
+
+const transporter = createTransport();
 
 async function sendEmail({ to, subject, text, html }) {
   const fromAddress = env.emailFrom.includes("<")

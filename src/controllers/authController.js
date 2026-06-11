@@ -221,8 +221,10 @@ async function logout(req, res, next) {
     if (refreshToken) {
       try {
         const decoded = verifyRefreshToken(refreshToken);
+        console.log(`[authController] logout request for user ${decoded.sub}`);
         await authService.logout(decoded.sub, refreshToken);
-      } catch {
+      } catch (error) {
+        console.warn('[authController] logout failed to verify refresh token:', error.message || error);
         // ignore invalid refresh token during logout
       }
     }
