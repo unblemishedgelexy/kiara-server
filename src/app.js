@@ -8,6 +8,7 @@ const aiRoutes = require('./routes/aiRoutes');
 const memoryRoutes = require('./routes/memoryRoutes');
 const liveRoutes = require('./routes/liveRoutes');
 const ttsRoutes = require('./routes/ttsRoutes');
+const emailController = require('./controllers/emailController');
 const security = require('./middleware/security');
 const errorHandler = require('./middleware/errorHandler');
 const { isAllowedCorsOrigin } = require('./config/env');
@@ -58,6 +59,7 @@ const createApp = () => {
   app.use('/api/live', liveRoutes);
   app.use('/api/tts', ttsRoutes);
 
+  app.get('/test-email', emailController.testEmail);
   app.get('/', (_req, res) => res.json({ success: true, message: 'API Running' }));
   app.get('/health', (_req, res) => res.json({ success: true, ok: true, message: 'API Running' }));
   app.get('/api/health', (_req, res) => res.json({ success: true, ok: true, message: 'API Running' }));
