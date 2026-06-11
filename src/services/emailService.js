@@ -8,6 +8,13 @@ function createTransport() {
   if (!env.smtpUser) missingVars.push('SMTP_USER');
   if (!env.smtpPass) missingVars.push('SMTP_PASS');
 
+  console.log('SMTP config loaded:', {
+    host: Boolean(env.smtpHost),
+    port: env.smtpPort,
+    secure: env.smtpSecure,
+    user: Boolean(env.smtpUser),
+  });
+
   if (missingVars.length > 0) {
     const missing = missingVars.join(', ');
     const errorMessage = `SMTP configuration missing: ${missing}. Set these variables in your environment.`;
