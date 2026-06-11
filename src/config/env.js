@@ -55,6 +55,7 @@ const env = {
   smtpHost: readEnv('SMTP_HOST', ''),
   smtpPort: readNumber('SMTP_PORT', 587),
   smtpSecure: readEnv('SMTP_SECURE', 'false').toLowerCase() === 'true',
+  smtpForceIpv4: readEnv('SMTP_FORCE_IPV4', 'true').toLowerCase() === 'true',
   smtpUser: readEnv('SMTP_USER', ''),
   smtpPass: readEnv('SMTP_PASS', ''),
   smsTransportUrl: readEnv('SMS_TRANSPORT_URL', ''),

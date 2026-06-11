@@ -1,7 +1,15 @@
 const nodemailer = require('nodemailer');
+const dns = require('dns').promises;
 const { env } = require('../config/env');
 
 let transporter = null;
+let smtpInitialization = {
+  success: false,
+  error: null,
+  usedPort: null,
+  usedHost: null,
+  verifyResult: null,
+};
 
 function formatErrorDetails(error) {
   if (!error || typeof error !== 'object') {
@@ -15,7 +23,6 @@ function formatErrorDetails(error) {
     responseCode: error.responseCode || null,
     message: error.message || null,
     stack: error.stack || null,
-    // nodemailer sometimes carries nested response objects
     responseHeaders: error.responseHeaders || null,
   };
 }
@@ -28,7 +35,7 @@ function getFromAddress() {
 
   if (from.toLowerCase() !== env.smtpUser.trim().toLowerCase()) {
     console.warn(
-      'EMAIL_FROM differs from SMTP_USER. Gmail may reject messages from a sender address that does not match the authenticated account. Using SMTP_USER as the from address for the transport.'
+      'EMAIL_FROM differs from SMTP_USER. Gmail may reject messages from a sender address that does not match the authenticated account.'
     );
     return env.smtpUser.trim();
   }
@@ -41,6 +48,7 @@ function buildSmtpDiagnostics() {
     SMTP_HOST: Boolean(env.smtpHost),
     SMTP_PORT: env.smtpPort,
     SMTP_SECURE: env.smtpSecure,
+    SMTP_FORCE_IPV4: env.smtpForceIpv4,
     SMTP_USER: Boolean(env.smtpUser),
     SMTP_PASS_EXISTS: Boolean(env.smtpPass),
     SMTP_PASS_LENGTH: env.smtpPass ? env.smtpPass.length : 0,
@@ -50,6 +58,7 @@ function buildSmtpDiagnostics() {
       Boolean(env.emailFrom) && Boolean(env.smtpUser)
         ? env.emailFrom.trim().toLowerCase() === env.smtpUser.trim().toLowerCase()
         : false,
+    smtpInitialization,
   };
 }
 
@@ -74,15 +83,13 @@ function validateSmtpConfig() {
   }
 }
 
-async function initEmailTransport() {
-  validateSmtpConfig();
-  console.log('SMTP config loaded:', buildSmtpDiagnostics());
-
-  const transportConfig = {
-    host: env.smtpHost,
-    port: env.smtpPort,
-    secure: env.smtpSecure,
-    requireTLS: true,
+function buildTransportConfig(host, port, secure) {
+  return {
+    host,
+    port,
+    secure,
+    name: env.smtpHost,
+    requireTLS: secure ? false : true,
     auth: {
       user: env.smtpUser,
       pass: env.smtpPass,
@@ -93,29 +100,135 @@ async function initEmailTransport() {
     socketTimeout: 10000,
     tls: {
       rejectUnauthorized: true,
+      servername: env.smtpHost,
     },
     logger: true,
     debug: true,
   };
+}
 
-  console.log(`Using explicit SMTP transport: ${env.smtpHost}:${env.smtpPort} secure=${env.smtpSecure}`);
-
-  transporter = nodemailer.createTransport(transportConfig);
+async function resolveDns() {
+  const dnsInfo = { ipv4: [], ipv6: [], errors: {} };
 
   try {
-    const verifyResult = await transporter.verify();
-    console.log('SMTP transport verified successfully.', { verifyResult });
-    return { success: true, verifyResult };
+    dnsInfo.ipv4 = await dns.resolve4(env.smtpHost);
+    console.log('SMTP DNS resolve4:', dnsInfo.ipv4);
   } catch (error) {
-    const diagnostics = formatErrorDetails(error);
-    console.error('SMTP transport verification failed:', diagnostics);
-    throw error;
+    dnsInfo.errors.resolve4 = formatErrorDetails(error);
+    console.warn('SMTP DNS resolve4 failed:', dnsInfo.errors.resolve4);
   }
+
+  try {
+    dnsInfo.ipv6 = await dns.resolve6(env.smtpHost);
+    console.log('SMTP DNS resolve6:', dnsInfo.ipv6);
+  } catch (error) {
+    dnsInfo.errors.resolve6 = formatErrorDetails(error);
+    console.warn('SMTP DNS resolve6 failed:', dnsInfo.errors.resolve6);
+  }
+
+  return dnsInfo;
+}
+
+async function tryCreateTransport(hostToUse, port, secure, reason) {
+  const config = buildTransportConfig(hostToUse, port, secure);
+  console.log(`Attempting SMTP transport (${reason})`, {
+    hostToUse,
+    port,
+    secure,
+    name: config.name,
+  });
+
+  const transport = nodemailer.createTransport(config);
+  const verifyResult = await transport.verify();
+  return { transport, verifyResult, config };
+}
+
+async function initEmailTransport() {
+  validateSmtpConfig();
+  console.log('SMTP config loaded:', buildSmtpDiagnostics());
+
+  const dnsInfo = await resolveDns();
+  const candidatePorts = [env.smtpPort];
+  if (env.smtpPort === 587) {
+    candidatePorts.push(465);
+  }
+
+  let lastError = null;
+
+  const transportCandidates = [];
+  if (env.smtpForceIpv4 && Array.isArray(dnsInfo.ipv4) && dnsInfo.ipv4.length > 0) {
+    transportCandidates.push(...candidatePorts.map((port) => ({
+      port,
+      secure: port === 465,
+      hostToUse: dnsInfo.ipv4[0],
+      reason: 'force-ipv4',
+    })));
+  }
+
+  transportCandidates.push(...candidatePorts.map((port) => ({
+    port,
+    secure: port === 465,
+    hostToUse: env.smtpHost,
+    reason: 'hostname',
+  })));
+
+  for (const candidate of transportCandidates) {
+    try {
+      const result = await tryCreateTransport(candidate.hostToUse, candidate.port, candidate.secure, candidate.reason);
+      transporter = result.transport;
+      smtpInitialization = {
+        success: true,
+        error: null,
+        usedPort: candidate.port,
+        usedHost: candidate.hostToUse,
+        verifyResult: result.verifyResult,
+      };
+      console.log('SMTP transport verified successfully.', {
+        usedPort: candidate.port,
+        usedHost: candidate.hostToUse,
+        verifyResult: result.verifyResult,
+      });
+      return smtpInitialization;
+    } catch (error) {
+      lastError = error;
+      const diagnostics = formatErrorDetails(error);
+      console.warn(`SMTP verification failed (${candidate.reason}) on port ${candidate.port}:`, diagnostics);
+      if (diagnostics.code === 'EAUTH') {
+        console.error('SMTP EAUTH error: authentication failed. Check SMTP_USER and SMTP_PASS.');
+      }
+      if (diagnostics.code === 'ETIMEDOUT') {
+        console.error('SMTP ETIMEDOUT error: connection timed out. Validate Render outbound port and DNS connectivity.');
+      }
+      if (diagnostics.code === 'ECONNECTION') {
+        console.error('SMTP ECONNECTION error: could not connect to SMTP host. Validate host, port, and network accessibility.');
+      }
+      if (diagnostics.code === 'ESOCKET') {
+        console.error('SMTP ESOCKET error: check IPv4/IPv6 routing, TLS, or socket-level connectivity.');
+      }
+      if (diagnostics.code === 'ENETUNREACH') {
+        console.error('SMTP ENETUNREACH error: network unreachable. Render may not route to the IPv6 address or network path is broken.');
+      }
+    }
+  }
+
+  transporter = null;
+  smtpInitialization = {
+    success: false,
+    error: formatErrorDetails(lastError),
+    usedPort: null,
+    usedHost: null,
+    verifyResult: null,
+  };
+
+  const initError = new Error('SMTP transport initialization failed for all candidates.');
+  initError.details = smtpInitialization.error;
+  console.error('SMTP transport initialization failed for all candidates.', smtpInitialization.error);
+  throw initError;
 }
 
 function getTransporter() {
   if (!transporter) {
-    throw new Error('Email transporter has not been initialized. Call initEmailTransport() before sending mail.');
+    throw new Error('Email transporter has not been initialized or SMTP health check failed.');
   }
   return transporter;
 }
@@ -143,23 +256,13 @@ async function sendEmail({ to, subject, text, html }) {
       accepted: info.accepted,
       rejected: info.rejected,
       response: info.response,
+      responseCode: info.responseCode || null,
       messageId: info.messageId,
     });
     return info;
   } catch (error) {
     const diagnostics = formatErrorDetails(error);
     console.error('Nodemailer sendMail failed:', diagnostics);
-
-    if (diagnostics.code === 'EAUTH') {
-      console.error('SMTP EAUTH error: authentication failed. Check SMTP_USER and SMTP_PASS.');
-    }
-    if (diagnostics.code === 'ETIMEDOUT') {
-      console.error('SMTP ETIMEDOUT error: SMTP host connection timed out. Check network, DNS, and port blocking.');
-    }
-    if (diagnostics.code === 'ECONNECTION') {
-      console.error('SMTP ECONNECTION error: could not connect to SMTP host. Check host, port, DNS, and network connectivity.');
-    }
-
     throw error;
   }
 }
@@ -367,8 +470,8 @@ async function sendTestEmail(to) {
   }
 
   const subject = 'Kiara test email';
-  const text = `This is a test message from Kiara. If you receive this email, SMTP is working correctly.`;
-  const html = `<p>This is a test message from Kiara.</p><p>If you receive this email, SMTP is working correctly.</p>`;
+  const text = `This is a test message from Kiara. If you receive this email, SMTP connectivity is working.`;
+  const html = `<p>This is a test message from Kiara.</p><p>If you receive this email, SMTP connectivity is working.</p>`;
 
   return sendEmail({
     to: resolvedTo,
