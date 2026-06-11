@@ -2,22 +2,29 @@ const nodemailer = require("nodemailer");
 const { env } = require("../config/env");
 
 function createTransport() {
-  let transportConfig;
-  if (env.smtpHost && env.smtpUser && env.smtpPass) {
-    transportConfig = {
-      host: env.smtpHost,
-      port: env.smtpPort,
-      secure: env.smtpSecure,
-      auth: {
-        user: env.smtpUser,
-        pass: env.smtpPass,
-      },
-    };
-    console.log(`Using explicit SMTP transport: ${env.smtpHost}:${env.smtpPort} secure=${env.smtpSecure}`);
-  } else {
-    transportConfig = { sendmail: true };
-    console.warn('No SMTP credentials configured. Falling back to sendmail transport.');
+  const missingVars = [];
+  if (!env.smtpHost) missingVars.push('SMTP_HOST');
+  if (!env.smtpPort) missingVars.push('SMTP_PORT');
+  if (!env.smtpUser) missingVars.push('SMTP_USER');
+  if (!env.smtpPass) missingVars.push('SMTP_PASS');
+
+  if (missingVars.length > 0) {
+    const missing = missingVars.join(', ');
+    const errorMessage = `SMTP configuration missing: ${missing}. Set these variables in your environment.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
   }
+
+  const transportConfig = {
+    host: env.smtpHost,
+    port: env.smtpPort,
+    secure: env.smtpSecure,
+    auth: {
+      user: env.smtpUser,
+      pass: env.smtpPass,
+    },
+  };
+  console.log(`Using explicit SMTP transport: ${env.smtpHost}:${env.smtpPort} secure=${env.smtpSecure}`);
 
   const transport = nodemailer.createTransport(transportConfig);
 
