@@ -1,237 +1,56 @@
 const nodemailer = require('nodemailer');
-const dns = require('dns').promises;
 const { env } = require('../config/env');
 
 let transporter = null;
-let smtpInitialization = {
-  success: false,
-  error: null,
-  usedPort: null,
-  usedHost: null,
-  verifyResult: null,
-};
 
 function formatErrorDetails(error) {
-  if (!error || typeof error !== 'object') {
-    return { message: String(error) };
-  }
-
+  if (!error || typeof error !== 'object') return { message: String(error) };
   return {
     code: error.code || null,
-    command: error.command || null,
-    response: error.response || null,
-    responseCode: error.responseCode || null,
     message: error.message || null,
+    response: error.response || null,
     stack: error.stack || null,
-    responseHeaders: error.responseHeaders || null,
   };
 }
 
 function getFromAddress() {
-  const from = env.emailFrom ? env.emailFrom.trim() : env.smtpUser.trim();
-  if (!from) {
-    throw new Error('EMAIL_FROM or SMTP_USER must be configured.');
-  }
-
-  if (from.toLowerCase() !== env.smtpUser.trim().toLowerCase()) {
-    console.warn(
-      'EMAIL_FROM differs from SMTP_USER. Gmail may reject messages from a sender address that does not match the authenticated account.'
-    );
-    return env.smtpUser.trim();
-  }
-
+  const from = env.emailFrom ? env.emailFrom.trim() : (process.env.EMAIL_USER || '').trim();
+  if (!from) throw new Error('EMAIL_FROM or EMAIL_USER must be configured.');
   return from;
 }
 
-function buildSmtpDiagnostics() {
-  return {
-    SMTP_HOST: Boolean(env.smtpHost),
-    SMTP_PORT: env.smtpPort,
-    SMTP_SECURE: env.smtpSecure,
-    SMTP_FORCE_IPV4: env.smtpForceIpv4,
-    SMTP_USER: Boolean(env.smtpUser),
-    SMTP_PASS_EXISTS: Boolean(env.smtpPass),
-    SMTP_PASS_LENGTH: env.smtpPass ? env.smtpPass.length : 0,
-    SMTP_PASS_APPPASSWORD: env.smtpPass ? env.smtpPass.length === 16 : false,
-    EMAIL_FROM: Boolean(env.emailFrom),
-    EMAIL_FROM_MATCHES_SMTP_USER:
-      Boolean(env.emailFrom) && Boolean(env.smtpUser)
-        ? env.emailFrom.trim().toLowerCase() === env.smtpUser.trim().toLowerCase()
-        : false,
-    smtpInitialization,
-  };
-}
-
-function validateSmtpConfig() {
-  const missingVars = [];
-  if (!env.smtpHost) missingVars.push('SMTP_HOST');
-  if (!env.smtpPort) missingVars.push('SMTP_PORT');
-  if (!env.smtpUser) missingVars.push('SMTP_USER');
-  if (!env.smtpPass) missingVars.push('SMTP_PASS');
-
-  if (missingVars.length > 0) {
-    const missing = missingVars.join(', ');
-    const message = `SMTP configuration missing: ${missing}. Set these variables in your environment.`;
-    console.error(message);
-    throw new Error(message);
-  }
-
-  if (env.smtpPass.length !== 16) {
-    console.warn(
-      `SMTP_PASS appears to be ${env.smtpPass.length} characters long. Gmail App Passwords should be 16 characters.`
-    );
-  }
-}
-
-function buildTransportConfig(host, port, secure) {
-  return {
-    host,
-    port,
-    secure,
-    name: env.smtpHost,
-    requireTLS: secure ? false : true,
+async function initEmailTransport() {
+  // Create a simple Gmail transport using environment `EMAIL_USER` and `EMAIL_PASS`.
+  // Do NOT verify at startup; server startup must not depend on email availability.
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
     auth: {
-      user: env.smtpUser,
-      pass: env.smtpPass,
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
     },
-    authMethod: 'LOGIN',
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 10000,
-    tls: {
-      rejectUnauthorized: true,
-      servername: env.smtpHost,
-    },
-    logger: true,
-    debug: true,
-  };
-}
-
-async function resolveDns() {
-  const dnsInfo = { ipv4: [], ipv6: [], errors: {} };
-
-  try {
-    dnsInfo.ipv4 = await dns.resolve4(env.smtpHost);
-    console.log('SMTP DNS resolve4:', dnsInfo.ipv4);
-  } catch (error) {
-    dnsInfo.errors.resolve4 = formatErrorDetails(error);
-    console.warn('SMTP DNS resolve4 failed:', dnsInfo.errors.resolve4);
-  }
-
-  try {
-    dnsInfo.ipv6 = await dns.resolve6(env.smtpHost);
-    console.log('SMTP DNS resolve6:', dnsInfo.ipv6);
-  } catch (error) {
-    dnsInfo.errors.resolve6 = formatErrorDetails(error);
-    console.warn('SMTP DNS resolve6 failed:', dnsInfo.errors.resolve6);
-  }
-
-  return dnsInfo;
-}
-
-async function tryCreateTransport(hostToUse, port, secure, reason) {
-  const config = buildTransportConfig(hostToUse, port, secure);
-  console.log(`Attempting SMTP transport (${reason})`, {
-    hostToUse,
-    port,
-    secure,
-    name: config.name,
   });
 
-  const transport = nodemailer.createTransport(config);
-  const verifyResult = await transport.verify();
-  return { transport, verifyResult, config };
-}
-
-async function initEmailTransport() {
-  validateSmtpConfig();
-  console.log('SMTP config loaded:', buildSmtpDiagnostics());
-
-  const dnsInfo = await resolveDns();
-  const candidatePorts = [env.smtpPort];
-  if (env.smtpPort === 587) {
-    candidatePorts.push(465);
-  }
-
-  let lastError = null;
-
-  const transportCandidates = [];
-  if (env.smtpForceIpv4 && Array.isArray(dnsInfo.ipv4) && dnsInfo.ipv4.length > 0) {
-    transportCandidates.push(...candidatePorts.map((port) => ({
-      port,
-      secure: port === 465,
-      hostToUse: dnsInfo.ipv4[0],
-      reason: 'force-ipv4',
-    })));
-  }
-
-  transportCandidates.push(...candidatePorts.map((port) => ({
-    port,
-    secure: port === 465,
-    hostToUse: env.smtpHost,
-    reason: 'hostname',
-  })));
-
-  for (const candidate of transportCandidates) {
-    try {
-      const result = await tryCreateTransport(candidate.hostToUse, candidate.port, candidate.secure, candidate.reason);
-      transporter = result.transport;
-      smtpInitialization = {
-        success: true,
-        error: null,
-        usedPort: candidate.port,
-        usedHost: candidate.hostToUse,
-        verifyResult: result.verifyResult,
-      };
-      console.log('SMTP transport verified successfully.', {
-        usedPort: candidate.port,
-        usedHost: candidate.hostToUse,
-        verifyResult: result.verifyResult,
-      });
-      return smtpInitialization;
-    } catch (error) {
-      lastError = error;
-      const diagnostics = formatErrorDetails(error);
-      console.warn(`SMTP verification failed (${candidate.reason}) on port ${candidate.port}:`, diagnostics);
-      if (diagnostics.code === 'EAUTH') {
-        console.error('SMTP EAUTH error: authentication failed. Check SMTP_USER and SMTP_PASS.');
-      }
-      if (diagnostics.code === 'ETIMEDOUT') {
-        console.error('SMTP ETIMEDOUT error: connection timed out. Validate Render outbound port and DNS connectivity.');
-      }
-      if (diagnostics.code === 'ECONNECTION') {
-        console.error('SMTP ECONNECTION error: could not connect to SMTP host. Validate host, port, and network accessibility.');
-      }
-      if (diagnostics.code === 'ESOCKET') {
-        console.error('SMTP ESOCKET error: check IPv4/IPv6 routing, TLS, or socket-level connectivity.');
-      }
-      if (diagnostics.code === 'ENETUNREACH') {
-        console.error('SMTP ENETUNREACH error: network unreachable. Render may not route to the IPv6 address or network path is broken.');
-      }
-    }
-  }
-
-  transporter = null;
-  smtpInitialization = {
-    success: false,
-    error: formatErrorDetails(lastError),
-    usedPort: null,
-    usedHost: null,
-    verifyResult: null,
-  };
-
-  const initError = new Error('SMTP transport initialization failed for all candidates.');
-  initError.details = smtpInitialization.error;
-  console.error('SMTP transport initialization failed for all candidates.', smtpInitialization.error);
-  throw initError;
+  console.log('Email transport created using Gmail service (no startup verification).');
+  return { success: true };
 }
 
 function getTransporter() {
   if (!transporter) {
-    throw new Error('Email transporter has not been initialized or SMTP health check failed.');
+    transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
   }
   return transporter;
 }
+
+// OTP generation unchanged
+const generateOTP = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit OTP
+};
 
 async function sendEmail({ to, subject, text, html }) {
   const transport = getTransporter();
@@ -240,7 +59,7 @@ async function sendEmail({ to, subject, text, html }) {
   const message = {
     from: fromAddress,
     to,
-    replyTo: env.emailFrom || env.smtpUser,
+    replyTo: env.emailFrom || process.env.EMAIL_USER,
     subject,
     text,
     html,
@@ -256,217 +75,31 @@ async function sendEmail({ to, subject, text, html }) {
       accepted: info.accepted,
       rejected: info.rejected,
       response: info.response,
-      responseCode: info.responseCode || null,
       messageId: info.messageId,
     });
     return info;
   } catch (error) {
-    const diagnostics = formatErrorDetails(error);
-    console.error('Nodemailer sendMail failed:', diagnostics);
+    console.error('Email send failed:', error);
     throw error;
   }
 }
 
-async function sendOTPEmail(to, code, userName = 'User') {
+async function sendOTPEmail(email, code = null, userName = 'User') {
+  const otp = code || generateOTP();
+
   const subject = 'Kiara: Your verification code';
 
-  const text = `Hello ${userName},
+  const text = `Hello ${userName},\n\nWe received a request to verify your email address.\n\nYour Kiara verification code is: ${otp}\n\nThis code expires in 10 minutes.\n\nFor your security, never share this code with anyone.\n\nIf you did not request this, you can safely ignore this email.\n\nRegards,\nKiara Team`;
 
-We received a request to verify your email address.
+  const html = `\n<!DOCTYPE html>\n<html>\n<head>\n<meta charset="UTF-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1.0" />\n<title>Email Verification</title>\n</head>\n\n<body style="\nmargin:0;\npadding:0;\nbackground:#f4f7fa;\nfont-family:Arial,Helvetica,sans-serif;\n">\n\n<table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0;background:#f4f7fa;">\n<tr>\n<td align="center">\n\n<table width="600" cellpadding="0" cellspacing="0" style="\nbackground:#ffffff;\nborder-radius:12px;\nborder:1px solid #e5e7eb;\noverflow:hidden;\n">\n\n<tr>\n<td align="center" style="padding:40px 30px 20px;">\n\n<img\nsrc="https://ik.imagekit.io/fg2rlac5z/kiara-ai/kiara-logo/transparent-image.png"\nalt="Kiara"\nwidth="80"\nheight="80"\nstyle="border-radius:50%;display:block;"\n>\n\n<h1 style="\nmargin:20px 0 0;\nfont-size:28px;\ncolor:#111827;\n">\nKiara\n</h1>\n\n<p style="\nmargin-top:10px;\nfont-size:14px;\ncolor:#6b7280;\n">\nSecure Account Verification\n</p>\n\n</td>\n</tr>\n\n<tr>\n<td style="padding:20px 40px;">\n\n<p style="\nmargin:0;\nfont-size:16px;\nline-height:1.7;\ncolor:#111827;\n">\nHello ${userName},\n</p>\n\n<p style="\nfont-size:16px;\nline-height:1.7;\ncolor:#374151;\nmargin-top:20px;\n">\nWe received a request to verify your email address.\nUse the verification code below to continue securely.\n</p>\n\n</td>\n</tr>\n\n<tr>\n<td align="center" style="padding:10px 40px 30px;">\n\n<div style="\ndisplay:inline-block;\npadding:18px 35px;\nfont-size:34px;\nfont-weight:700;\nletter-spacing:8px;\nbackground:#f9fafb;\nborder:1px solid #d1d5db;\nborder-radius:10px;\ncolor:#111827;\n">\n${otp}\n</div>\n\n</td>\n</tr>\n\n<tr>\n<td style="padding:0 40px 30px;">\n\n<p style="\nfont-size:15px;\nline-height:1.8;\ncolor:#4b5563;\n">\nThis verification code will expire in\n<strong>10 minutes</strong>.\n</p>\n\n<p style="\nfont-size:15px;\nline-height:1.8;\ncolor:#4b5563;\n">\nFor your security, never share this code with anyone.\n</p>\n\n<p style="\nfont-size:15px;\nline-height:1.8;\ncolor:#4b5563;\n">\nIf you did not request this verification, you can safely ignore this email.\n</p>\n\n</td>\n</tr>\n\n<tr>\n<td style="\npadding:25px 40px;\nbackground:#f9fafb;\nborder-top:1px solid #e5e7eb;\n">\n\n<p style="\nmargin:0;\nfont-size:14px;\ncolor:#6b7280;\n">\nRegards,\n</p>\n\n<p style="\nmargin-top:8px;\nfont-size:15px;\nfont-weight:600;\ncolor:#111827;\n">\nKiara Security Team\n</p>\n\n</td>\n</tr>\n\n</table>\n\n</td>\n</tr>\n</table>\n\n</body>\n</html>\n`;
 
-Your Kiara verification code is: ${code}
-
-This code expires in 10 minutes.
-
-For your security, never share this code with anyone.
-
-If you did not request this, you can safely ignore this email.
-
-Regards,
-Kiara Team`;
-
-  const html = `
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Email Verification</title>
-</head>
-
-<body style="
-margin:0;
-padding:0;
-background:#f4f7fa;
-font-family:Arial,Helvetica,sans-serif;
-">
-
-<table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0;background:#f4f7fa;">
-<tr>
-<td align="center">
-
-<table width="600" cellpadding="0" cellspacing="0" style="
-background:#ffffff;
-border-radius:12px;
-border:1px solid #e5e7eb;
-overflow:hidden;
-">
-
-<tr>
-<td align="center" style="padding:40px 30px 20px;">
-
-<img
-src="https://ik.imagekit.io/fg2rlac5z/kiara-ai/kiara-logo/transparent-image.png"
-alt="Kiara"
-width="80"
-height="80"
-style="border-radius:50%;display:block;"
->
-
-<h1 style="
-margin:20px 0 0;
-font-size:28px;
-color:#111827;
-">
-Kiara
-</h1>
-
-<p style="
-margin-top:10px;
-font-size:14px;
-color:#6b7280;
-">
-Secure Account Verification
-</p>
-
-</td>
-</tr>
-
-<tr>
-<td style="padding:20px 40px;">
-
-<p style="
-margin:0;
-font-size:16px;
-line-height:1.7;
-color:#111827;
-">
-Hello ${userName},
-</p>
-
-<p style="
-font-size:16px;
-line-height:1.7;
-color:#374151;
-margin-top:20px;
-">
-We received a request to verify your email address.
-Use the verification code below to continue securely.
-</p>
-
-</td>
-</tr>
-
-<tr>
-<td align="center" style="padding:10px 40px 30px;">
-
-<div style="
-display:inline-block;
-padding:18px 35px;
-font-size:34px;
-font-weight:700;
-letter-spacing:8px;
-background:#f9fafb;
-border:1px solid #d1d5db;
-border-radius:10px;
-color:#111827;
-">
-${code}
-</div>
-
-</td>
-</tr>
-
-<tr>
-<td style="padding:0 40px 30px;">
-
-<p style="
-font-size:15px;
-line-height:1.8;
-color:#4b5563;
-">
-This verification code will expire in
-<strong>10 minutes</strong>.
-</p>
-
-<p style="
-font-size:15px;
-line-height:1.8;
-color:#4b5563;
-">
-For your security, never share this code with anyone.
-</p>
-
-<p style="
-font-size:15px;
-line-height:1.8;
-color:#4b5563;
-">
-If you did not request this verification, you can safely ignore this email.
-</p>
-
-</td>
-</tr>
-
-<tr>
-<td style="
-padding:25px 40px;
-background:#f9fafb;
-border-top:1px solid #e5e7eb;
-">
-
-<p style="
-margin:0;
-font-size:14px;
-color:#6b7280;
-">
-Regards,
-</p>
-
-<p style="
-margin-top:8px;
-font-size:15px;
-font-weight:600;
-color:#111827;
-">
-Kiara Security Team
-</p>
-
-</td>
-</tr>
-
-</table>
-
-</td>
-</tr>
-</table>
-
-</body>
-</html>
-`;
-
-  return sendEmail({
-    to,
-    subject,
-    text,
-    html,
-  });
+  return sendEmail({ to: email, subject, text, html });
 }
 
 async function sendTestEmail(to) {
-  const resolvedTo = to && typeof to === 'string' ? to.trim() : env.emailFrom || env.smtpUser;
+  const resolvedTo = to && typeof to === 'string' ? to.trim() : env.emailFrom || process.env.EMAIL_USER;
   if (!resolvedTo) {
-    throw new Error('Test email recipient is missing. Provide a `to` query parameter or set EMAIL_FROM/SMTP_USER.');
+    throw new Error('Test email recipient is missing. Provide a `to` query parameter or set EMAIL_FROM/EMAIL_USER.');
   }
 
   const subject = 'Kiara test email';
@@ -481,8 +114,114 @@ async function sendTestEmail(to) {
   });
 }
 
-function getEmailTransportDiagnostics() {
-  return buildSmtpDiagnostics();
+async function sendDeleteNotification(email, message) {
+  const mailHtml = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px; border: 1px solid #ddd; border-radius: 5px; max-width: 600px; margin: auto;">
+      <h2 style="color: #d9534f;">Account Deletion Notification</h2>
+      <p>Hello,</p>
+      <p>This is to inform you that your account has been deleted by an administrator. The reason provided is:</p>
+      <blockquote style="background-color: #f9f9f9; border-left: 5px solid #ccc; margin: 15px 0; padding: 10px 20px; font-style: italic;">
+        <p style="margin: 0;">${message}</p>
+      </blockquote>
+      <p>If you believe this was a mistake or have any questions, please contact our support team.</p>
+      <p>This is an automated message. Please do not reply.</p>
+    </div>
+  `;
+
+  try {
+    await sendEmail({
+      to: email,
+      subject: 'Account Deletion Notification',
+      text: `Your account has been deleted. Reason: ${message}`,
+      html: mailHtml,
+    });
+
+    return { success: true };
+  } catch (error) {
+    console.error('Email send failed:', error);
+    throw error;
+  }
+}
+
+async function sendReportNotification(user, message) {
+  const mailHtml = `        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; padding: 20px; border: 1px solid #ddd; border-radius: 5px; max-width: 600px; margin: auto;">
+          <h2 style="color: #007bff;">Report Confirmation</h2>
+          <p>Hello,</p>
+          <p>This email is to confirm that your report has been successfully submitted. We appreciate you taking the time to report this issue.</p>
+          <p>Here are the details of your report:</p>
+          <ul>
+            <li><strong>Report Number:</strong> ${message.reportNumber}</li>
+            <li><strong>Reported By:</strong> ${user.username} (${user.email})</li>
+            <li><strong>Report Details:</strong> ${message.reportDetails}</li>
+          </ul>
+          <p>Your report is currently awaiting approval. You will receive another email once it has been approved or resolved.</p>
+          <p>Thank you for helping us maintain a safe and productive environment.</p>
+          <p>This is an automated message. Please do not reply.</p>
+        </div>
+      `;
+
+  try {
+    await sendEmail({
+      to: user.email,
+      subject: 'Report Notification',
+      text: `Report submitted: ${message.reportNumber}`,
+      html: mailHtml,
+    });
+
+    return { success: true };
+  } catch (error) {
+    console.error('Email send failed:', error);
+    throw error;
+  }
+}
+
+async function sendtemplateRejectedNotification(user, message) {
+  const mailHtml = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 20px auto; border: 1px solid #ddd; border-radius: 10px; overflow: hidden;">
+      <div style="background-color: #f8f8f8; padding: 20px; text-align: center;">
+        <h1 style="color: #c0392b; margin: 0;">Template Submission Update</h1>
+      </div>
+      <div style="padding: 25px;">
+        <p style="font-size: 16px;">Hi ${user.name || 'there'},</p>
+        <p style="font-size: 16px;">
+          Thank you for submitting your template to our platform. Our team has reviewed your submission, and unfortunately, it did not meet our guidelines at this time.
+        </p>
+        <p style="font-size: 16px;">
+          Here is the feedback from our review team:
+        </p>
+        <div style="background-color: #fff5f5; border-left: 4px solid #c0392b; padding: 15px; margin: 20px 0; font-style: italic;">
+          <p style="margin: 0;">${message}</p>
+        </div>
+        <p style="font-size: 16px;">
+          We encourage you to review this feedback and our submission guidelines. You are welcome to make adjustments and resubmit your template for another review.
+        </p>
+        <p style="font-size: 16px;">
+          Thank you for your understanding and contribution.
+        </p>
+        <p style="font-size: 16px; margin-top: 30px;">
+          Best regards,<br>
+          The C.V. Forge Team
+        </p>
+      </div>
+      <div style="background-color: #f8f8f8; padding: 15px; text-align: center; font-size: 12px; color: #777;">
+        <p style="margin: 0;">&copy; ${new Date().getFullYear()} The Resume Builder. All rights reserved.</p>
+      </div>
+    </div>
+  `;
+
+  try {
+    await sendEmail({
+      to: user.email,
+      subject: 'An Update on Your Template Submission',
+      text: `Template submission update: ${message}`,
+      html: mailHtml,
+    });
+
+    return { success: true };
+  } catch (error) {
+    console.error('Email send failed:', error);
+    throw error;
+  }
 }
 
 module.exports = {
@@ -490,6 +229,9 @@ module.exports = {
   sendEmail,
   sendOTPEmail,
   sendTestEmail,
+  sendDeleteNotification,
+  sendReportNotification,
+  sendtemplateRejectedNotification,
+  generateOTP,
   formatErrorDetails,
-  getEmailTransportDiagnostics,
 };
