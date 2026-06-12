@@ -1,7 +1,6 @@
 const createApp = require('./app');
 const connectDB = require('./db/connect');
 const { env } = require('./config/env');
-const { initEmailTransport } = require('./services/emailService');
 
 async function startServer() {
   const dbConnected = await connectDB();
@@ -9,8 +8,6 @@ async function startServer() {
   if (!dbConnected) {
     console.warn('Proceeding without MongoDB. Memory routes may be unavailable.');
   }
-
-  await initEmailTransport();
 
   const app = createApp();
   const port = env.port || 4000;

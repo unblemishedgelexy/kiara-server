@@ -2,6 +2,8 @@ const nodemailer = require('nodemailer');
 const { env } = require('../config/env');
 
 let transporter = null;
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
 function formatErrorDetails(error) {
   if (!error || typeof error !== 'object') return { message: String(error) };
@@ -45,6 +47,62 @@ function getTransporter() {
     });
   }
   return transporter;
+}
+
+/**
+ * Send email via Brevo API
+ * More reliable and professional email delivery
+ */
+async function sendViaBrevo({ to, subject, text, html }) {
+  if (!BREVO_API_KEY) {
+    throw new Error('BREVO_API_KEY not configured');
+  }
+
+  const fromAddress = getFromAddress();
+
+  try {
+    const response = await fetch(BREVO_API_URL, {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'api-key': BREVO_API_KEY,
+      },
+      body: JSON.stringify({
+        to: [{ email: to }],
+        sender: { email: fromAddress, name: 'Kiara' },
+        subject,
+        htmlContent: html || `<p>${text}</p>`,
+        textContent: text,
+        replyTo: { email: fromAddress },
+        headers: {
+          'X-Mailer': 'Kiara',
+          'X-Priority': '3',
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Brevo API error: ${response.status} - ${errorData.message || 'Unknown error'}`);
+    }
+
+    const data = await response.json();
+    console.log('Brevo email sent successfully.', {
+      messageId: data.messageId,
+      to,
+      subject,
+    });
+
+    return {
+      messageId: data.messageId,
+      accepted: [to],
+      rejected: [],
+    };
+  } catch (error) {
+    console.error('Brevo email send failed:', error.message);
+    throw error;
+  }
 }
 
 // OTP generation unchanged
@@ -92,6 +150,14 @@ async function sendOTPEmail(email, code = null, userName = 'User') {
   const text = `Hello ${userName},\n\nWe received a request to verify your email address.\n\nYour Kiara verification code is: ${otp}\n\nThis code expires in 10 minutes.\n\nFor your security, never share this code with anyone.\n\nIf you did not request this, you can safely ignore this email.\n\nRegards,\nKiara Team`;
 
   const html = `\n<!DOCTYPE html>\n<html>\n<head>\n<meta charset="UTF-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1.0" />\n<title>Email Verification</title>\n</head>\n\n<body style="\nmargin:0;\npadding:0;\nbackground:#f4f7fa;\nfont-family:Arial,Helvetica,sans-serif;\n">\n\n<table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 0;background:#f4f7fa;">\n<tr>\n<td align="center">\n\n<table width="600" cellpadding="0" cellspacing="0" style="\nbackground:#ffffff;\nborder-radius:12px;\nborder:1px solid #e5e7eb;\noverflow:hidden;\n">\n\n<tr>\n<td align="center" style="padding:40px 30px 20px;">\n\n<img\nsrc="https://ik.imagekit.io/fg2rlac5z/kiara-ai/kiara-logo/transparent-image.png"\nalt="Kiara"\nwidth="80"\nheight="80"\nstyle="border-radius:50%;display:block;"\n>\n\n<h1 style="\nmargin:20px 0 0;\nfont-size:28px;\ncolor:#111827;\n">\nKiara\n</h1>\n\n<p style="\nmargin-top:10px;\nfont-size:14px;\ncolor:#6b7280;\n">\nSecure Account Verification\n</p>\n\n</td>\n</tr>\n\n<tr>\n<td style="padding:20px 40px;">\n\n<p style="\nmargin:0;\nfont-size:16px;\nline-height:1.7;\ncolor:#111827;\n">\nHello ${userName},\n</p>\n\n<p style="\nfont-size:16px;\nline-height:1.7;\ncolor:#374151;\nmargin-top:20px;\n">\nWe received a request to verify your email address.\nUse the verification code below to continue securely.\n</p>\n\n</td>\n</tr>\n\n<tr>\n<td align="center" style="padding:10px 40px 30px;">\n\n<div style="\ndisplay:inline-block;\npadding:18px 35px;\nfont-size:34px;\nfont-weight:700;\nletter-spacing:8px;\nbackground:#f9fafb;\nborder:1px solid #d1d5db;\nborder-radius:10px;\ncolor:#111827;\n">\n${otp}\n</div>\n\n</td>\n</tr>\n\n<tr>\n<td style="padding:0 40px 30px;">\n\n<p style="\nfont-size:15px;\nline-height:1.8;\ncolor:#4b5563;\n">\nThis verification code will expire in\n<strong>10 minutes</strong>.\n</p>\n\n<p style="\nfont-size:15px;\nline-height:1.8;\ncolor:#4b5563;\n">\nFor your security, never share this code with anyone.\n</p>\n\n<p style="\nfont-size:15px;\nline-height:1.8;\ncolor:#4b5563;\n">\nIf you did not request this verification, you can safely ignore this email.\n</p>\n\n</td>\n</tr>\n\n<tr>\n<td style="\npadding:25px 40px;\nbackground:#f9fafb;\nborder-top:1px solid #e5e7eb;\n">\n\n<p style="\nmargin:0;\nfont-size:14px;\ncolor:#6b7280;\n">\nRegards,\n</p>\n\n<p style="\nmargin-top:8px;\nfont-size:15px;\nfont-weight:600;\ncolor:#111827;\n">\nKiara Security Team\n</p>\n\n</td>\n</tr>\n\n</table>\n\n</td>\n</tr>\n</table>\n\n</body>\n</html>\n`;
+
+  if (BREVO_API_KEY) {
+    try {
+      return await sendViaBrevo({ to: email, subject, text, html });
+    } catch (error) {
+      console.warn('Brevo email failed, falling back to SMTP send:', error.message || error);
+    }
+  }
 
   return sendEmail({ to: email, subject, text, html });
 }
