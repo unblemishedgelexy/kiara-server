@@ -11,12 +11,14 @@
  */
 
 const authServiceV2 = require('../services/authServiceV2');
+const { verifyRefreshToken } = require('../services/tokenService');
 const UserModel = require('../models/User');
 
 // ============= REGISTRATION =============
 async function register(req, res, next) {
   try {
     const { firstName, lastName, email, password, mobileNumber } = req.body;
+    console.log('Registration request:', { firstName, lastName, email, mobileNumber });
 
     const result = await authServiceV2.registerUser({
       firstName,
@@ -228,12 +230,21 @@ async function getVerificationStatus(req, res, next) {
 // ============= LOGOUT =============
 async function logout(req, res, next) {
   try {
-    const userId = req.user?.id || req.user?._id;
+    // Allow logout via authenticated user or by providing refreshToken
+    let userId = req.user?.id || req.user?._id;
+    const refreshToken = req.body?.refreshToken || req.cookies?.refreshToken;
+
+    if (!userId && refreshToken) {
+      try {
+        const decoded = verifyRefreshToken(String(refreshToken));
+        userId = decoded.sub;
+      } catch (err) {
+        // ignore - will return unauthorized below
+      }
+    }
+
     if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: 'Unauthorized.',
-      });
+      return res.status(401).json({ success: false, message: 'Unauthorized.' });
     }
 
     const result = await authServiceV2.logout(userId);
@@ -255,13 +266,22 @@ async function logout(req, res, next) {
 async function refreshToken(req, res, next) {
   try {
     const refreshToken = req.body.refreshToken || req.cookies?.refreshToken;
-    const userId = req.user?.id || req.user?._id;
 
-    if (!refreshToken || !userId) {
-      return res.status(401).json({
-        success: false,
-        message: 'Refresh token missing or unauthorized.',
-      });
+    if (!refreshToken) {
+      return res.status(401).json({ success: false, message: 'Refresh token missing.' });
+    }
+
+    // If request already carries an authenticated user, prefer that id
+    let userId = req.user?.id || req.user?._id;
+
+    // Otherwise try to verify the refresh token to extract the subject
+    if (!userId) {
+      try {
+        const decoded = verifyRefreshToken(String(refreshToken));
+        userId = decoded.sub;
+      } catch (err) {
+        return res.status(401).json({ success: false, message: 'Refresh token invalid or expired.' });
+      }
     }
 
     const result = await authServiceV2.refreshAccessToken(userId, refreshToken);

@@ -123,6 +123,8 @@ function sanitizeUser(user) {
  */
 async function registerUser({ firstName, lastName, email, password, mobileNumber }) {
   // Validate input
+
+  console.log('Registering user:', { firstName, lastName, email, mobileNumber });
   if (!firstName || !lastName) {
     throw new Error('First name and last name are required.');
   }
@@ -157,6 +159,8 @@ async function registerUser({ firstName, lastName, email, password, mobileNumber
   // Hash password
   const passwordHash = await hashPassword(password);
 
+  console.log('Creating user with email:', firstName, lastName, normalizedEmail, mobileNumber);
+ try {
   // Create user with isVerified = false
   const user = await UserModel.create({
     firstName: firstName.trim(),
@@ -173,6 +177,10 @@ async function registerUser({ firstName, lastName, email, password, mobileNumber
     isActive: true,
   });
 
+  if (!user) {
+    throw new Error('Failed to create user. Please try again.');
+  }
+
   // Generate tokens for immediate login
   const accessToken = generateAccessToken({ sub: user._id });
   const refreshToken = generateRefreshToken({ sub: user._id });
@@ -185,6 +193,10 @@ async function registerUser({ firstName, lastName, email, password, mobileNumber
     accessToken,
     refreshToken,
   };
+  } catch (error) {
+    console.error('Error during user creation:', error.message);
+    throw new Error('Failed to create user. Please try again.');
+  }
 }
 
 /**

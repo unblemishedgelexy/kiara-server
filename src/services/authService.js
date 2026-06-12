@@ -90,24 +90,32 @@ async function registerUser({ firstName, lastName, email, password, mobileNumber
   // Hash password
   const passwordHash = await hashPassword(password);
   
-  // Create user (not verified yet)
+  // Create user and mark as verified immediately for direct registration
   const user = await UserModel.create({
     firstName,
     lastName,
     displayName: `${firstName} ${lastName}`.trim(),
     email: normalizedEmail,
-    emailVerified: false, // Will be verified via OTP
+    emailVerified: true,
     mobileNumber: mobileNumber || undefined,
-    mobileVerified: false,
+    mobileVerified: Boolean(mobileNumber),
     passwordHash,
     role: 'user',
     mode: 'registered',
   });
   
-  // Generate and send OTP
-  const otp = await generateAndSendOTP(normalizedEmail, 'REGISTER_EMAIL');
-  
-  return { user: sanitizeUser(user), otpSent: true, message: 'Registration successful. OTP sent to your email.' };
+  // Generate tokens for immediate login if registration succeeds
+  const accessToken = generateAccessToken({ sub: user._id });
+  const refreshToken = generateRefreshToken({ sub: user._id });
+  await createSession(user._id, refreshToken);
+
+  return {
+    success: true,
+    message: 'Registration successful. You can login immediately.',
+    user: sanitizeUser(user),
+    accessToken,
+    refreshToken,
+  };
 }
 
 // ============= OTP FUNCTIONS =============
@@ -196,11 +204,6 @@ async function loginWithEmailPassword(email, password) {
   // Check if account is locked
   if (user.loginLockedUntil && user.loginLockedUntil > new Date()) {
     throw new Error('Account is temporarily locked. Please try again later.');
-  }
-  
-  // Check if email is verified
-  if (!user.emailVerified) {
-    throw new Error('Email not verified. Please verify your email with the OTP sent to your email.');
   }
   
   // Verify password

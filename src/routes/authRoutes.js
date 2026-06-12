@@ -3,19 +3,7 @@ const Joi = require('joi');
 const validateRequest = require('../middleware/validateRequest');
 const authMiddleware = require('../middleware/authMiddleware');
 const { env } = require('../config/env');
-const { 
-  register, 
-  sendOtp, 
-  verifyOtp, 
-  login, 
-  refreshToken, 
-  logout, 
-  sendForgotPasswordOtp, 
-  verifyForgotPasswordOtp, 
-  resetPasswordHandler,
-  getGoogleAuthUrl,
-  handleGoogleCallback,
-} = require('../controllers/authController');
+const authController = require('../controllers/authController');
 
 const router = express.Router();
 
@@ -87,22 +75,22 @@ const resetPasswordSchema = Joi.object({
   }),
 });
 
-// Authentication endpoints
-router.post('/register', validateRequest(registerSchema), register);
-router.post('/login', validateRequest(loginSchema), login);
-router.get('/google/url', validateRequest(Joi.object({ query: Joi.object({ redirectUri: Joi.string().required() }).unknown(true) })), getGoogleAuthUrl);
-router.get('/google/callback', handleGoogleCallback);
-router.post('/send-otp', validateRequest(sendOtpSchema), sendOtp);
-router.post('/verify-otp', validateRequest(verifyOtpSchema), verifyOtp);
+// Authentication endpoints - all using standard authController
+router.post('/register', validateRequest(registerSchema), authController.register);
+router.post('/login', validateRequest(loginSchema), authController.login);
+router.get('/google/url', validateRequest(Joi.object({ query: Joi.object({ redirectUri: Joi.string().required() }).unknown(true) })), authController.getGoogleAuthUrl);
+router.get('/google/callback', authController.handleGoogleCallback);
+router.post('/send-otp', validateRequest(sendOtpSchema), authController.sendOtp);
+router.post('/verify-otp', validateRequest(verifyOtpSchema), authController.verifyOtp);
 
 // Forgot Password endpoints
-router.post('/forgot-password/send-otp', validateRequest(forgotPasswordSendSchema), sendForgotPasswordOtp);
-router.post('/forgot-password/verify-otp', validateRequest(forgotPasswordVerifySchema), verifyForgotPasswordOtp);
-router.post('/forgot-password/reset', validateRequest(resetPasswordSchema), resetPasswordHandler);
+router.post('/forgot-password/send-otp', validateRequest(forgotPasswordSendSchema), authController.sendForgotPasswordOtp);
+router.post('/forgot-password/verify-otp', validateRequest(forgotPasswordVerifySchema), authController.verifyForgotPasswordOtp);
+router.post('/forgot-password/reset', validateRequest(resetPasswordSchema), authController.resetPasswordHandler);
 
 // Token management
-router.post('/refresh-token', refreshToken);
-router.post('/logout', logout);
+router.post('/refresh-token', authController.refreshToken);
+router.post('/logout', authController.logout);
 
 module.exports = router;
 

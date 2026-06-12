@@ -39,7 +39,8 @@ async function register(req, res, next) {
       success: true,
       message: result.message,
       user: result.user,
-      otpSent: result.otpSent,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
     });
   } catch (error) {
     const statusCode = error.message.includes('already') ? 400 : 400;

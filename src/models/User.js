@@ -11,14 +11,8 @@ const userSchema = new mongoose.Schema(
     email: { type: String, lowercase: true, sparse: true, trim: true, unique: true, required: true },
     passwordHash: { type: String, required: true },
     
-    // Email verification - NEW FIELDS FOR REDESIGNED FLOW
-    isVerified: { type: Boolean, default: false }, // Account verification status
-    verifiedAt: { type: Date, default: null }, // Timestamp when account was verified
-    verificationMethod: { 
-      type: String, 
-      enum: ['registration_otp', 'password_reset_otp', 'oauth', 'admin'],
-      default: null 
-    }, // How the account was verified
+    // Email verification
+    emailVerified: { type: Boolean, default: false },
     
     // Legacy OAuth fields (optional for Google Sign-In)
     googleId: { type: String, trim: true, sparse: true, unique: true },
@@ -54,17 +48,6 @@ const userSchema = new mongoose.Schema(
 
 // Indexes for performance and uniqueness
 userSchema.index({ createdAt: -1 });
-userSchema.index({ email: 1 });
-userSchema.index({ isVerified: 1 });
-userSchema.index({ verifiedAt: 1 });
-
-// Pre-save hook to update verifiedAt timestamp
-userSchema.pre('save', function(next) {
-  // If isVerified changes from false to true and verifiedAt is not set, set it now
-  if (this.isModified('isVerified') && this.isVerified && !this.verifiedAt) {
-    this.verifiedAt = new Date();
-  }
-  next();
-});
+userSchema.index({ emailVerified: 1 });
 
 module.exports = mongoose.models.User || mongoose.model('User', userSchema);
