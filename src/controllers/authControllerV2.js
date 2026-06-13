@@ -47,20 +47,12 @@ async function login(req, res, next) {
 
     const result = await authServiceV2.loginWithEmailPassword(email, password, ipAddress);
 
-    // Set refresh token in httpOnly cookie (optional but recommended)
-    res.cookie('refreshToken', result.refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    });
-
     res.json({
       success: true,
       message: 'Login successful.',
       user: result.user,
       accessToken: result.accessToken,
-      refreshToken: result.refreshToken, // Also in response for mobile apps
+      refreshToken: result.refreshToken,
     });
   } catch (error) {
     console.error('Login error:', error.message);
@@ -232,7 +224,11 @@ async function logout(req, res, next) {
   try {
     // Allow logout via authenticated user or by providing refreshToken
     let userId = req.user?.id || req.user?._id;
-    const refreshToken = req.body?.refreshToken || req.cookies?.refreshToken;
+    const refreshToken = typeof req.body?.refreshToken === 'string'
+      ? req.body.refreshToken
+      : typeof req.headers['x-refresh-token'] === 'string'
+      ? req.headers['x-refresh-token']
+      : null;
 
     if (!userId && refreshToken) {
       try {
@@ -249,9 +245,6 @@ async function logout(req, res, next) {
 
     const result = await authServiceV2.logout(userId);
 
-    // Clear refresh token cookie
-    res.clearCookie('refreshToken');
-
     res.json(result);
   } catch (error) {
     console.error('Logout error:', error.message);
@@ -265,7 +258,11 @@ async function logout(req, res, next) {
 // ============= REFRESH TOKEN =============
 async function refreshToken(req, res, next) {
   try {
-    const refreshToken = req.body.refreshToken || req.cookies?.refreshToken;
+    const refreshToken = typeof req.body?.refreshToken === 'string'
+      ? req.body.refreshToken
+      : typeof req.headers['x-refresh-token'] === 'string'
+      ? req.headers['x-refresh-token']
+      : null;
 
     if (!refreshToken) {
       return res.status(401).json({ success: false, message: 'Refresh token missing.' });
@@ -285,14 +282,6 @@ async function refreshToken(req, res, next) {
     }
 
     const result = await authServiceV2.refreshAccessToken(userId, refreshToken);
-
-    // Update refresh token cookie
-    res.cookie('refreshToken', result.refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 30 * 24 * 60 * 60 * 1000,
-    });
 
     res.json({
       success: true,

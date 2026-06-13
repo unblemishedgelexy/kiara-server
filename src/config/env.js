@@ -91,6 +91,21 @@ function isProductionEnv() {
   return env.nodeEnv === 'production';
 }
 
+// Normalize a return URL for strict comparison when validating OAuth return targets
+function normalizeReturnUrl(url) {
+  if (!url) return '';
+  return url.trim().replace(/\/$/, '');
+}
+
+function isAllowedOAuthReturnUrl(url) {
+  try {
+    const normalized = normalizeReturnUrl(url);
+    return env.googleAuthAllowedReturnUrls.map(normalizeReturnUrl).includes(normalized);
+  } catch (e) {
+    return false;
+  }
+}
+
 function isNativeAppOrigin(origin) {
   try {
     const parsedOrigin = new URL(origin);
@@ -110,4 +125,4 @@ function isAllowedCorsOrigin(origin) {
   return env.clientOrigins.includes(normalizedOrigin) || isNativeAppOrigin(normalizedOrigin);
 }
 
-module.exports = { env, isProductionEnv, isAllowedCorsOrigin, isNativeAppOrigin };
+module.exports = { env, isProductionEnv, isAllowedCorsOrigin, isNativeAppOrigin, isAllowedOAuthReturnUrl };

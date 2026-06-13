@@ -1,7 +1,9 @@
 const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 const OAuthStateModel = require('../models/OAuthState');
-const { env } = require('../config/env');
+const AuthTicketModel = require('../models/AuthTicket');
+const { env, isAllowedOAuthReturnUrl } = require('../config/env');
+const { hashToken } = require('./tokenService');
 
 function base64UrlEncode(buffer) {
   return buffer
@@ -23,16 +25,12 @@ function createState() {
   return base64UrlEncode(crypto.randomBytes(32));
 }
 
-function isAllowedReturnUrl(url) {
-  return env.googleAuthAllowedReturnUrls.includes(url);
-}
-
 async function createAuthRequest(returnUrl) {
   if (!returnUrl || typeof returnUrl !== 'string') {
     throw new Error('A redirectUri is required.');
   }
 
-  if (!isAllowedReturnUrl(returnUrl)) {
+  if (!isAllowedOAuthReturnUrl(returnUrl)) {
     throw new Error('The requested redirect URL is not allowed.');
   }
 
@@ -65,6 +63,21 @@ async function consumeAuthState(state) {
   if (!state) return null;
   const authState = await OAuthStateModel.findOneAndDelete({ state });
   return authState || null;
+}
+
+async function createAuthTicket(userId, accessToken, refreshToken) {
+  const ticket = createState();
+  const ticketHash = hashToken(ticket);
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+  await AuthTicketModel.create({ ticketHash, userId, accessToken, refreshToken, expiresAt });
+  return ticket;
+}
+
+async function consumeAuthTicket(ticket) {
+  if (!ticket) return null;
+  const ticketHash = hashToken(ticket);
+  const authTicket = await AuthTicketModel.findOneAndDelete({ ticketHash });
+  return authTicket || null;
 }
 
 async function exchangeCodeForTokens(code, codeVerifier) {
@@ -125,6 +138,8 @@ async function verifyIdToken(idToken) {
 module.exports = {
   createAuthRequest,
   consumeAuthState,
+  createAuthTicket,
+  consumeAuthTicket,
   exchangeCodeForTokens,
   verifyIdToken,
 };

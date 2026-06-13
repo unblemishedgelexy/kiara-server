@@ -89,6 +89,7 @@ router.post('/forgot-password/verify-otp', validateRequest(forgotPasswordVerifyS
 router.post('/forgot-password/reset', validateRequest(resetPasswordSchema), authController.resetPasswordHandler);
 
 // Token management
+router.post('/auth-ticket', authController.exchangeAuthTicket);
 router.post('/refresh-token', authController.refreshToken);
 router.post('/logout', authController.logout);
 

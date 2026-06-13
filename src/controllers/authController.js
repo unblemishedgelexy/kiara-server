@@ -1,8 +1,5 @@
 const authService = require('../services/authService');
-const UserModel = require('../models/User');
-const { verifyAccessToken, verifyRefreshToken, generateAccessToken, generateRefreshToken } = require('../services/tokenService');
-const { env, isProductionEnv } = require('../config/env');
-const { extractBearerToken } = require('../utils/authCookies');
+const { verifyRefreshToken } = require('../services/tokenService');
 const googleOAuthService = require('../services/googleOAuthService');
 
 
@@ -170,16 +167,50 @@ async function handleGoogleCallback(req, res, next) {
     };
 
     const result = await authService.loginWithGoogle(googleUser);
+    const authTicket = await googleOAuthService.createAuthTicket(
+      result.user._id || result.user.id,
+      result.accessToken,
+      result.refreshToken
+    );
 
-    const redirectTarget = new URL(authState.returnUrl);
-    redirectTarget.searchParams.set('accessToken', result.accessToken);
-    redirectTarget.searchParams.set('refreshToken', result.refreshToken);
-    redirectTarget.searchParams.set('token', result.accessToken);
+    const redirectUrl = new URL(authState.returnUrl);
+    redirectUrl.searchParams.set('auth_ticket', authTicket);
+    redirectUrl.searchParams.set('status', 'success');
 
-    return res.redirect(303, redirectTarget.toString());
+    return res.redirect(303, redirectUrl.toString());
   } catch (error) {
     console.error('[authController] Google callback error:', error);
     return res.status(500).json({ success: false, message: error.message || 'Google callback failed.' });
+  }
+}
+
+// ============= TICKET EXCHANGE =============
+async function exchangeAuthTicket(req, res, next) {
+  try {
+    const authTicket = typeof req.body?.authTicket === 'string' ? req.body.authTicket : null;
+    if (!authTicket) {
+      return res.status(400).json({ success: false, message: 'authTicket is required.' });
+    }
+
+    const ticket = await googleOAuthService.consumeAuthTicket(authTicket);
+    if (!ticket) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired auth ticket.' });
+    }
+
+    const user = await authService.findUserById(ticket.userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Auth ticket exchanged successfully.',
+      user: authService.sanitizeUser(user),
+      accessToken: ticket.accessToken,
+      refreshToken: ticket.refreshToken,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Failed to exchange auth ticket.' });
   }
 }
 
@@ -190,6 +221,7 @@ async function refreshToken(req, res, next) {
     const headerRefreshToken = typeof req.headers['x-refresh-token'] === 'string'
       ? req.headers['x-refresh-token']
       : null;
+
     const refreshToken = bodyRefreshToken || headerRefreshToken;
 
     if (!refreshToken) {
@@ -198,6 +230,7 @@ async function refreshToken(req, res, next) {
 
     const decoded = verifyRefreshToken(refreshToken);
     const result = await authService.refreshSession(decoded.sub, refreshToken, req.headers['user-agent'], req.ip);
+
     res.json({
       success: true,
       message: 'Token refreshed',
@@ -226,7 +259,6 @@ async function logout(req, res, next) {
         await authService.logout(decoded.sub, refreshToken);
       } catch (error) {
         console.warn('[authController] logout failed to verify refresh token:', error.message || error);
-        // ignore invalid refresh token during logout
       }
     }
 
@@ -322,6 +354,7 @@ module.exports = {
   login, 
   getGoogleAuthUrl, 
   handleGoogleCallback, 
+  exchangeAuthTicket,
   refreshToken, 
   logout, 
   sendForgotPasswordOtp, 
