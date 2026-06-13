@@ -16,14 +16,18 @@ function authMiddleware(req, res, next) {
   const token = readRequestToken(req);
 
   if (!token) {
+    console.warn('[authMiddleware] No token found in request for', req.method, req.path);
     return res.status(401).json({ success: false, message: 'Authentication required.' });
   }
 
   try {
+    console.debug('[authMiddleware] Verifying token for', req.method, req.path);
     const payload = verifyAccessToken(token);
+    console.debug('[authMiddleware] Token verified successfully for user', payload.sub);
     attachAuthUser(req, payload);
     next();
   } catch (err) {
+    console.error('[authMiddleware] Token verification failed:', err.message);
     return res.status(401).json({ success: false, message: 'Invalid or expired token.' });
   }
 }

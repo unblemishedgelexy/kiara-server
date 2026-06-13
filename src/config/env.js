@@ -100,7 +100,18 @@ function normalizeReturnUrl(url) {
 function isAllowedOAuthReturnUrl(url) {
   try {
     const normalized = normalizeReturnUrl(url);
-    return env.googleAuthAllowedReturnUrls.map(normalizeReturnUrl).includes(normalized);
+    const allowed = env.googleAuthAllowedReturnUrls.map(normalizeReturnUrl);
+
+    if (allowed.includes(normalized)) {
+      return true;
+    }
+
+    const parsed = new URL(url);
+    if (allowed.includes(parsed.origin)) {
+      return true;
+    }
+
+    return false;
   } catch (e) {
     return false;
   }
