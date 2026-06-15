@@ -139,23 +139,34 @@ async function getGoogleAuthUrl(req, res, next) {
 async function handleGoogleCallback(req, res, next) {
   try {
     const { code, state, error, error_description: errorDescription } = req.query;
+    console.log('[authController] 📍 Google callback received:', { hasCode: !!code, hasState: !!state, error });
 
     if (error) {
       const message = typeof errorDescription === 'string' ? errorDescription : 'Google authentication was cancelled or denied.';
+      console.warn('[authController] ❌ Google OAuth error:', { error, message });
       return res.status(400).json({ success: false, message });
     }
 
     if (!code || !state) {
+      console.error('[authController] ❌ Missing code or state');
       return res.status(400).json({ success: false, message: 'Missing code or state in callback response.' });
     }
 
+    console.log('[authController] 🔑 Consuming auth state...');
     const authState = await googleOAuthService.consumeAuthState(String(state));
     if (!authState) {
+      console.error('[authController] ❌ Auth state invalid or expired');
       return res.status(400).json({ success: false, message: 'Invalid or expired OAuth state.' });
     }
+    console.log('[authController] ✅ Auth state consumed, returnUrl:', authState.returnUrl);
 
+    console.log('[authController] 🔄 Exchanging code for tokens...');
     const tokenPayload = await googleOAuthService.exchangeCodeForTokens(String(code), authState.codeVerifier);
+    console.log('[authController] ✅ Code exchanged for tokens');
+    
+    console.log('[authController] 🔐 Verifying ID token...');
     const idTokenPayload = await googleOAuthService.verifyIdToken(tokenPayload.id_token);
+    console.log('[authController] ✅ ID token verified, user email:', idTokenPayload.email);
 
     const googleUser = {
       googleId: idTokenPayload.sub,
@@ -166,20 +177,26 @@ async function handleGoogleCallback(req, res, next) {
       googleEmail: idTokenPayload.email,
     };
 
+    console.log('[authController] 👤 Logging in with Google user:', { email: googleUser.email });
     const result = await authService.loginWithGoogle(googleUser);
+    console.log('[authController] ✅ User logged in, creating auth ticket...');
+    
     const authTicket = await googleOAuthService.createAuthTicket(
       result.user._id || result.user.id,
       result.accessToken,
       result.refreshToken
     );
+    console.log('[authController] 🎫 Auth ticket created');
 
     const redirectUrl = new URL(authState.returnUrl);
     redirectUrl.searchParams.set('auth_ticket', authTicket);
     redirectUrl.searchParams.set('status', 'success');
 
+    console.log('[authController] 🔀 Redirecting to:', redirectUrl.toString().split('?')[0] + '?...');
     return res.redirect(303, redirectUrl.toString());
   } catch (error) {
-    console.error('[authController] Google callback error:', error);
+    console.error('[authController] ❌ Google callback error:', error instanceof Error ? error.message : error);
+    console.error('[authController] Error stack:', error instanceof Error ? error.stack : '');
     return res.status(500).json({ success: false, message: error.message || 'Google callback failed.' });
   }
 }
