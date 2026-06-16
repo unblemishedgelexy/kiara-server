@@ -44,7 +44,7 @@ async function saveShortTermMemory(userId, sessionId, role, message) {
   try {
     const client = await getRedisClient();
     const key = `memory:short:${userId}:${sessionId}`;
-    const data = JSON.stringify({
+    const item = JSON.stringify({
       userId,
       sessionId,
       role,
@@ -52,8 +52,9 @@ async function saveShortTermMemory(userId, sessionId, role, message) {
       timestamp: new Date().toISOString(),
     });
 
-    // Set with TTL (time to live) from environment or default 1 hour
-    await client.setEx(key, env.shortTermMemoryTTL, data);
+    await client.rPush(key, item);
+    await client.lTrim(key, -100, -1);
+    await client.expire(key, env.shortTermMemoryTTL);
     return { success: true, key };
   } catch (error) {
     console.error('Error saving to Redis:', error);
@@ -66,13 +67,20 @@ async function getShortTermMemory(userId, sessionId) {
   try {
     const client = await getRedisClient();
     const key = `memory:short:${userId}:${sessionId}`;
-    const data = await client.get(key);
-    
-    if (!data) {
-      return null;
+    const items = await client.lRange(key, 0, -1);
+
+    if (!items || items.length === 0) {
+      return [];
     }
 
-    return JSON.parse(data);
+    return items.reduce((acc, item) => {
+      try {
+        acc.push(JSON.parse(item));
+      } catch {
+        // Skip invalid items
+      }
+      return acc;
+    }, []);
   } catch (error) {
     console.error('Error retrieving from Redis:', error);
     throw error;

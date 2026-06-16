@@ -8,6 +8,7 @@ const aiRoutes = require('./routes/aiRoutes');
 const memoryRoutes = require('./routes/memoryRoutes');
 const liveRoutes = require('./routes/liveRoutes');
 const ttsRoutes = require('./routes/ttsRoutes');
+const identityRoutes = require('./routes/identityRoutes');
 const emailController = require('./controllers/emailController');
 const security = require('./middleware/security');
 const errorHandler = require('./middleware/errorHandler');
@@ -57,6 +58,7 @@ const createApp = () => {
   app.use('/api/ai', aiRoutes);
   app.use('/api/memory', memoryRoutes);
   app.use('/api/live', liveRoutes);
+  app.use('/api/identity', identityRoutes);
   app.use('/api/tts', ttsRoutes);
 
   app.get('/test-email', emailController.testEmail);

@@ -80,6 +80,9 @@ const env = {
   redisPassword: readEnv('REDIS_PASSWORD', ''),
   // Memory TTL Configuration
   shortTermMemoryTTL: readNumber('SHORT_TERM_MEMORY_TTL', 3600), // 1 hour
+  pineconeApiKey: readEnv('PINECONE_API_KEY', ''),
+  pineconeIndexName: readEnv('PINECONE_INDEX_NAME', 'kiara-long-term-memory'),
+  pineconeVectorDimension: readNumber('PINECONE_VECTOR_DIMENSION', 1536),
   // ImageKit configuration
   imagekitPublicKey: readEnv('IMAGEKIT_PUBLIC_KEY', ''),
   imagekitPrivateKey: readEnv('IMAGEKIT_PRIVATE_KEY', ''),

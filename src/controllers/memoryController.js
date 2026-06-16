@@ -1,4 +1,5 @@
 const memoryService = require('../services/memoryService');
+const stmToLtmConverter = require('../services/stmToLtmConverter');
 
 async function addShort(req, res, next) {
   try {
@@ -12,7 +13,8 @@ async function addShort(req, res, next) {
 async function getShort(req, res, next) {
   try {
     const { sessionId } = req.params;
-    const docs = await memoryService.getShortTerm(sessionId);
+    const userId = req.userId;
+    const docs = await memoryService.getShortTerm(userId, sessionId);
     res.json({ success: true, data: docs });
   } catch (err) { next(err); }
 }
@@ -20,7 +22,8 @@ async function getShort(req, res, next) {
 async function deleteShort(req, res, next) {
   try {
     const { sessionId } = req.params;
-    await memoryService.deleteShortTerm(sessionId);
+    const userId = req.userId;
+    await memoryService.deleteShortTerm(userId, sessionId);
     res.json({ success: true, message: 'Deleted' });
   } catch (err) { next(err); }
 }
@@ -58,6 +61,39 @@ async function patchLong(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function searchLong(req, res, next) {
+  try {
+    const userId = req.userId;
+    const { query } = req.query;
+    if (!query || !query.trim()) {
+      return res.json({ success: true, data: [] });
+    }
+    const results = await memoryService.searchLongTermVectors(userId, query.trim());
+    res.json({ success: true, data: results });
+  } catch (err) { next(err); }
+}
+
+async function promoteStmSession(req, res, next) {
+  try {
+    const userId = req.userId;
+    const { sessionId } = req.params;
+    const result = await stmToLtmConverter.manualPromoteSession(userId, sessionId);
+    res.json({ success: result.success, data: result });
+  } catch (err) { next(err); }
+}
+
+async function promoteAllStm(req, res, next) {
+  try {
+    const userId = req.userId;
+    const stats = await stmToLtmConverter.promoteStmToLtm(userId);
+    res.json({
+      success: true,
+      data: stats,
+      message: `Promoted ${stats.promoted} memories to LTM`,
+    });
+  } catch (err) { next(err); }
+}
+
 async function getContext(req, res, next) {
   try {
     const userId = req.userId;
@@ -84,6 +120,9 @@ module.exports = {
   getLong,
   deleteLong,
   patchLong,
+  searchLong,
+  promoteStmSession,
+  promoteAllStm,
   getContext,
   saveMessage,
 };

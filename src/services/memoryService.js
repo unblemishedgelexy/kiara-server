@@ -2,7 +2,12 @@ const { MEMORY_RECENT_MESSAGE_LIMIT, MEMORY_SUMMARY_BATCH_SIZE, MEMORY_SUMMARY_T
 const ChatModel = require('../models/Chat');
 const MessageModel = require('../models/Message');
 const SummaryModel = require('../models/Summary');
-const { summarizeConversation } = require('./geminiService');
+const LongTermMemory = require('../models/LongTermMemory');
+const { summarizeConversation, analyzeConversation } = require('./geminiService');
+const { encrypt, decrypt } = require('../utils/crypto');
+const redisService = require('./redisService');
+const pineconeService = require('./pineconeService');
+const { env } = require('../config/env');
 
 async function getOrCreateChat(userId, chatId) {
   if (chatId) {
@@ -41,22 +46,55 @@ async function maybeRefreshSummary(chatId, userId) {
   await SummaryModel.create({ chatId, content, upToMessageCreatedAt: lastMessage.createdAt, userId });
 }
 
-const ShortTermMemory = require('../models/ShortTermMemory');
-const LongTermMemory = require('../models/LongTermMemory');
-const { analyzeConversation } = require('./geminiService');
-const { encrypt, decrypt } = require('../utils/crypto');
-
-async function addShortTerm({ userId, sessionId, role, message, ttlSeconds = 900 }) {
-  const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
-  return ShortTermMemory.create({ userId, sessionId, role, message, expiresAt });
+function normalizeTextForEmbedding(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-async function getShortTerm(sessionId) {
-  return ShortTermMemory.find({ sessionId }).sort({ timestamp: 1 });
+function createTextEmbedding(text, dimension = env.pineconeVectorDimension || 128) {
+  const normalized = normalizeTextForEmbedding(text);
+  const vector = new Array(dimension).fill(0);
+
+  for (let i = 0; i < normalized.length; i += 1) {
+    const charCode = normalized.charCodeAt(i);
+    vector[i % dimension] += ((charCode % 31) + 1) * 0.1;
+  }
+
+  const length = Math.hypot(...vector) || 1;
+  return vector.map((value) => value / length);
 }
 
-async function deleteShortTerm(sessionId) {
-  return ShortTermMemory.deleteMany({ sessionId });
+async function persistLongTermToPinecone(doc, analysis) {
+  if (!pineconeService.isPineconeConfigured()) {
+    return;
+  }
+
+  const vector = createTextEmbedding(analysis.memory);
+  const metadata = {
+    userId: String(doc.userId),
+    category: doc.category,
+    importanceScore: doc.importanceScore,
+    tags: Array.isArray(doc.tags) ? doc.tags.join(',') : '',
+    contentPreview: analysis.memory.slice(0, 1000),
+    createdAt: doc.createdAt.toISOString(),
+  };
+
+  try {
+    await pineconeService.upsertLongTermVector({ id: String(doc._id), vector, metadata });
+  } catch (error) {
+    console.warn('Failed to persist long-term memory to Pinecone:', error);
+  }
+}
+
+async function addShortTerm({ userId, sessionId, role, message }) {
+  return redisService.saveShortTermMemory(userId, sessionId, role, message);
+}
+
+async function getShortTerm(userId, sessionId) {
+  return redisService.getShortTermMemory(userId, sessionId);
+}
+
+async function deleteShortTerm(userId, sessionId) {
+  return redisService.deleteShortTermMemory(userId, sessionId);
 }
 
 async function analyzeAndSaveLongTerm({ userId, text }) {
@@ -70,6 +108,8 @@ async function analyzeAndSaveLongTerm({ userId, text }) {
     tags: analysis.tags || [],
     importanceScore: analysis.importanceScore || 0,
   });
+
+  await persistLongTermToPinecone(doc, analysis);
   return { stored: true, doc, analysis };
 }
 
@@ -84,13 +124,78 @@ async function getLongTerm(userId) {
   }));
 }
 
+async function searchLongTermVectors(userId, query) {
+  if (!pineconeService.isPineconeConfigured()) {
+    return [];
+  }
+
+  try {
+    const queryVector = createTextEmbedding(query);
+    const matches = await pineconeService.queryLongTermVectors({
+      vector: queryVector,
+      topK: 10,
+      filter: { userId: { $eq: String(userId) } },
+    });
+
+    return matches.map((match) => ({
+      id: match.id,
+      score: match.score,
+      metadata: match.metadata,
+    }));
+  } catch (error) {
+    console.warn('Failed to search long-term memory vectors:', error);
+    return [];
+  }
+}
+
 async function deleteLongTerm(id) {
-  return LongTermMemory.findByIdAndDelete(id);
+  const deleted = await LongTermMemory.findByIdAndDelete(id);
+  if (deleted && pineconeService.isPineconeConfigured()) {
+    try {
+      await pineconeService.deleteLongTermVector(String(id));
+    } catch (error) {
+      console.warn('Failed to delete long-term memory from Pinecone:', error);
+    }
+  }
+  return deleted;
 }
 
 async function patchLongTerm(id, patch) {
-  if (patch.memory) patch.encryptedMemory = encrypt(patch.memory);
-  return LongTermMemory.findByIdAndUpdate({ _id: id }, { ...patch, updatedAt: new Date() }, { returnDocument: 'after' });
+  const updatedMemory = patch.memory;
+
+  if (typeof updatedMemory === 'string') {
+    patch.encryptedMemory = encrypt(updatedMemory);
+    delete patch.memory;
+  }
+
+  const updated = await LongTermMemory.findByIdAndUpdate(
+    { _id: id },
+    { ...patch, updatedAt: new Date() },
+    { returnDocument: 'after' }
+  );
+
+  if (updated && updatedMemory && pineconeService.isPineconeConfigured()) {
+    const metadata = {
+      userId: String(updated.userId),
+      category: updated.category,
+      importanceScore: updated.importanceScore,
+      tags: Array.isArray(updated.tags) ? updated.tags.join(',') : '',
+      contentPreview: updatedMemory.slice(0, 1000),
+      updatedAt: updated.updatedAt.toISOString(),
+    };
+
+    try {
+      await pineconeService.upsertLongTermVector({
+        id: String(updated._id),
+        vector: createTextEmbedding(updatedMemory),
+        metadata,
+      });
+    } catch (error) {
+      console.warn('Failed to update long-term memory in Pinecone:', error);
+    }
+  }
+
+  return updated;
 }
 
 module.exports = {
@@ -104,4 +209,5 @@ module.exports = {
   getLongTerm,
   deleteLongTerm,
   patchLongTerm,
+  searchLongTermVectors,
 };
