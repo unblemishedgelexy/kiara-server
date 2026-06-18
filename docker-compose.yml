@@ -1,0 +1,13 @@
+services:
+  redis:
+    image: redis:7.2
+    container_name: kiara-server-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+    name: kiara-server-redis-data

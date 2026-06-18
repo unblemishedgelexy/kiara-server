@@ -26,6 +26,14 @@ const createApp = () => {
     console.warn('Failed to start gemini health poller', e);
   }
 
+  // start session prefetch worker for continuity
+  try {
+    const prefetch = require('./services/sessionPrefetchWorker');
+    prefetch.start();
+  } catch (e) {
+    console.warn('Failed to start session prefetch worker', e);
+  }
+
   app.use(cors({
     origin: (origin, callback) => {
       if (isAllowedCorsOrigin(origin)) {

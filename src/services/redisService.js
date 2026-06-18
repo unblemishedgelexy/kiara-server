@@ -7,14 +7,21 @@ async function initRedis() {
   if (redisClient) return redisClient;
 
   try {
-    const options = {
-      host: env.redisHost,
-      port: env.redisPort,
-      db: env.redisDb,
-    };
+    const options = {};
 
-    if (env.redisPassword) {
-      options.password = env.redisPassword;
+    if (env.redisUrl) {
+      options.url = env.redisUrl;
+      console.log('Redis using REDIS_URL for connection');
+    } else {
+      options.socket = {
+        host: env.redisHost,
+        port: env.redisPort,
+      };
+      options.database = env.redisDb;
+
+      if (env.redisPassword) {
+        options.password = env.redisPassword;
+      }
     }
 
     redisClient = redis.createClient(options);
@@ -24,7 +31,8 @@ async function initRedis() {
     });
 
     await redisClient.connect();
-    console.log('Redis connected successfully');
+    const pingResult = await redisClient.ping();
+    console.log(`Redis connected successfully (${pingResult})`);
     return redisClient;
   } catch (error) {
     console.error('Failed to initialize Redis:', error);
@@ -109,9 +117,13 @@ async function getUserShortTermMemories(userId) {
     
     const memories = [];
     for (const key of keys) {
-      const data = await client.get(key);
-      if (data) {
-        memories.push(JSON.parse(data));
+      const items = await client.lRange(key, 0, -1);
+      for (const item of items) {
+        try {
+          memories.push(JSON.parse(item));
+        } catch {
+          // Skip invalid items
+        }
       }
     }
 

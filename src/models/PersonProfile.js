@@ -35,6 +35,45 @@ const personProfileSchema = new mongoose.Schema(
     faceEmbeddings: [embeddingSchema],
     voiceEmbeddings: [embeddingSchema],
 
+    faceDescriptor: {
+      type: [Number],
+      index: true
+    },
+
+    voiceDescriptor: {
+      type: [Number],
+      index: true
+    },
+
+    descriptorKey: {
+      type: String,
+      index: true
+    },
+
+    voiceCharacteristics: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null
+    },
+
+    isLearned: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+
+    recognitionHistory: [
+      {
+        timestamp: { type: Date, default: Date.now },
+        faceScore: { type: Number, default: 0 },
+        voiceScore: { type: Number, default: 0 },
+        overallConfidence: { type: Number, default: 0 },
+        source: { type: String, default: 'unknown' }
+      }
+    ],
+
+    lastFaceCapture: Date,
+    lastVoiceCapture: Date,
+
     faceConfidence: {
       type: Number,
       min: 0,

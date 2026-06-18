@@ -25,6 +25,8 @@ const shortTermMemorySchema = new mongoose.Schema(
       default: 0
     },
 
+    confidence: { type: Number, min: 0, max: 1, default: 0.5 },
+
     expiresAt: {
       type: Date,
       default: () => new Date(Date.now() + 24 * 60 * 60 * 1000)

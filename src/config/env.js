@@ -77,7 +77,13 @@ const env = {
   redisHost: readEnv('REDIS_HOST', 'localhost'),
   redisPort: readNumber('REDIS_PORT', 6379),
   redisDb: readNumber('REDIS_DB', 0),
+  redisUrl: readEnv('REDIS_URL', ''),
   redisPassword: readEnv('REDIS_PASSWORD', ''),
+  enablePinecone: readEnv('ENABLE_PINECONE', 'true').toLowerCase() === 'true',
+  enableQueue: readEnv('ENABLE_QUEUE', 'true').toLowerCase() === 'true',
+  enableProfileCache: readEnv('ENABLE_PROFILE_CACHE', 'true').toLowerCase() === 'true',
+  enableUnfinishedContext: readEnv('ENABLE_UNFINISHED_CONTEXT', 'true').toLowerCase() === 'true',
+  bootstrapVersion: readNumber('BOOTSTRAP_VERSION', 1),
   // Memory TTL Configuration
   shortTermMemoryTTL: readNumber('SHORT_TERM_MEMORY_TTL', 3600), // 1 hour
   pineconeApiKey: readEnv('PINECONE_API_KEY', ''),

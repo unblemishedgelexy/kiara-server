@@ -5,7 +5,7 @@ const memorySchema = new mongoose.Schema(
     userId: {
       type: String,
       required: true,
-      index: true
+      index: true,
     },
 
     category: {
@@ -13,55 +13,69 @@ const memorySchema = new mongoose.Schema(
       enum: [
         'identity',
         'preference',
+        'preferences',
         'relationship',
+        'relationships',
         'project',
+        'projects',
         'goal',
+        'goals',
         'event',
-        'fact'
+        'events',
+        'fact',
+        'facts',
+        'other',
       ],
-      required: true
+      required: true,
     },
 
-    content: {
+    encryptedMemory: {
       type: String,
-      required: true
+      required: true,
     },
 
-    importance: {
+    tags: {
+      type: [String],
+      default: [],
+    },
+
+    importanceScore: {
       type: Number,
       min: 0,
       max: 1,
-      default: 0.5
+      default: 0.5,
     },
 
     accessCount: {
       type: Number,
-      default: 0
+      default: 0,
     },
 
     memoryStrength: {
       type: Number,
-      default: 1
+      default: 1,
     },
 
     lastAccessed: {
       type: Date,
-      default: Date.now
+      default: Date.now,
     },
 
     emotionalWeight: {
       type: Number,
       min: 0,
       max: 1,
-      default: 0
-    }
+      default: 0,
+    },
+    confidence: { type: Number, min: 0, max: 1, default: 0.5 },
+    fingerprint: { type: String, index: true },
   },
   {
-    timestamps: true
+    timestamps: true,
   }
 );
 
 memorySchema.index({ userId: 1, category: 1 });
-memorySchema.index({ userId: 1, importance: -1 });
+memorySchema.index({ userId: 1, importanceScore: -1 });
 
 module.exports = mongoose.model('Memory', memorySchema);

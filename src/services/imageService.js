@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const ImageKit = require('imagekit');
+const ImageKit = require('@imagekit/nodejs');
 const { env } = require('../config/env');
 
 const imagekit = new ImageKit({

@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const { MEMORY_RECENT_MESSAGE_LIMIT, MEMORY_SUMMARY_BATCH_SIZE, MEMORY_SUMMARY_TRIGGER } = require('../config/constants');
 const ChatModel = require('../models/Chat');
 const MessageModel = require('../models/Message');
@@ -7,6 +8,9 @@ const { summarizeConversation, analyzeConversation } = require('./geminiService'
 const { encrypt, decrypt } = require('../utils/crypto');
 const redisService = require('./redisService');
 const pineconeService = require('./pineconeService');
+const memoryRetrievalService = require('./memoryRetrievalService');
+const ConversationState = require('../models/ConversationState');
+const sessionMemoryService = require('./sessionMemoryService');
 const { env } = require('../config/env');
 
 async function getOrCreateChat(userId, chatId) {
@@ -31,8 +35,29 @@ async function saveRealtimeMessage(input) {
 async function getMemorySnapshot(userId, chatId) {
   const chat = await getOrCreateChat(userId, chatId);
   const latestSummary = await SummaryModel.findOne({ chatId: chat._id, userId }).sort({ upToMessageCreatedAt: -1 });
-  const recentMessages = await MessageModel.find({ chatId: chat._id, createdAt: latestSummary ? { $gt: latestSummary.upToMessageCreatedAt } : undefined, userId }).sort({ createdAt: -1 }).limit(MEMORY_RECENT_MESSAGE_LIMIT).lean();
-  return { chatId: String(chat._id), summary: latestSummary ? latestSummary.content : '', turns: recentMessages.reverse().map((message) => ({ createdAt: message.createdAt.getTime(), id: String(message._id), role: message.role, text: message.content })) };
+  const recentMessages = await MessageModel.find({ chatId: chat._id, createdAt: latestSummary ? { $gt: latestSummary.upToMessageCreatedAt } : undefined, userId })
+    .sort({ createdAt: -1 })
+    .limit(MEMORY_RECENT_MESSAGE_LIMIT)
+    .lean();
+
+  const identityMemories = await memoryRetrievalService.retrieveIdentityMemories(userId);
+  const preferenceMemories = await memoryRetrievalService.retrievePreferenceMemories(userId);
+  const relationshipMemories = await memoryRetrievalService.retrieveRelationshipMemories(userId);
+  const projectMemories = await memoryRetrievalService.retrieveProjectMemories(userId);
+  const goalMemories = await memoryRetrievalService.retrieveGoalMemories(userId);
+  const relevantLongTermMemories = await memoryRetrievalService.retrieveRelevantMemories(userId);
+
+  return {
+    chatId: String(chat._id),
+    summary: latestSummary ? latestSummary.content : '',
+    turns: recentMessages.reverse().map((message) => ({ createdAt: message.createdAt.getTime(), id: String(message._id), role: message.role, text: message.content })),
+    identityMemories,
+    preferenceMemories,
+    relationshipMemories,
+    projectMemories,
+    goalMemories,
+    relevantLongTermMemories,
+  };
 }
 
 async function maybeRefreshSummary(chatId, userId) {
@@ -198,6 +223,107 @@ async function patchLongTerm(id, patch) {
   return updated;
 }
 
+async function getMemoryDiagnostics(userId) {
+  const diagnostics = {
+    chats: 0,
+    summaries: 0,
+    shortTermCount: 0,
+    longTermCount: 0,
+    identityCount: 0,
+    preferenceCount: 0,
+    relationshipCount: 0,
+    projectCount: 0,
+    goalCount: 0,
+    pineconeConfigured: pineconeService.isPineconeConfigured(),
+    redisConnected: false,
+    mongoConnected: mongoose.connection.readyState === 1,
+  };
+
+  try {
+    diagnostics.chats = await ChatModel.countDocuments({ userId });
+    diagnostics.summaries = await SummaryModel.countDocuments({ userId });
+    diagnostics.longTermCount = await LongTermMemory.countDocuments({ userId });
+    diagnostics.identityCount = await LongTermMemory.countDocuments({ userId, category: { $in: ['identity'] } });
+    diagnostics.preferenceCount = await LongTermMemory.countDocuments({ userId, category: { $in: ['preference', 'preferences'] } });
+    diagnostics.relationshipCount = await LongTermMemory.countDocuments({ userId, category: { $in: ['relationship', 'relationships'] } });
+    diagnostics.projectCount = await LongTermMemory.countDocuments({ userId, category: { $in: ['project', 'projects'] } });
+    diagnostics.goalCount = await LongTermMemory.countDocuments({ userId, category: { $in: ['goal', 'goals'] } });
+
+    const client = await redisService.getRedisClient();
+    if (client) {
+      diagnostics.redisConnected = true;
+      const keys = await client.keys(`memory:short:${userId}:*`);
+      diagnostics.shortTermCount = keys.length;
+    }
+    // Conversation state
+    try {
+      const state = await ConversationState.findOne({ userId }).sort({ updatedAt: -1 }).lean();
+      diagnostics.conversationState = state || null;
+    } catch (e) {
+      diagnostics.conversationState = null;
+    }
+    // Active session memory sample
+    try {
+      const active = await sessionMemoryService.getActiveSessionMemory(userId, 'default');
+      diagnostics.activeSessionMemory = active || null;
+    } catch (e) {
+      diagnostics.activeSessionMemory = null;
+    }
+  } catch (error) {
+    console.warn('Memory diagnostics warning:', error);
+  }
+
+  return diagnostics;
+}
+
+function truncateText(text, maxChars) {
+  if (!text) return '';
+  return text.length <= maxChars ? text : `${text.slice(0, maxChars)}...`;
+}
+
+async function buildMemoryContext(userId, chatId, query) {
+  const snapshot = await getMemorySnapshot(userId, chatId);
+  const memoryQuery = typeof query === 'string' ? query : '';
+  const relevantLongTermMemories = await memoryRetrievalService.retrieveRelevantMemories(userId, memoryQuery);
+
+  const contextPieces = [];
+
+  if (snapshot.summary) {
+    contextPieces.push(`Summary:\n${truncateText(snapshot.summary, 1200)}`);
+  }
+
+  if (snapshot.turns.length) {
+    const turnsText = snapshot.turns.slice(-10).map((turn) => `${turn.role}: ${truncateText(turn.text, 300)}`).join('\n');
+    contextPieces.push(`Recent conversation turns:\n${turnsText}`);
+  }
+
+  const addCategories = (label, memories) => {
+    if (!memories || memories.length === 0) return;
+    const section = memories.slice(0, 5).map((m) => `- (${m.importanceScore.toFixed(2)}) ${truncateText(m.memory, 260)}`).join('\n');
+    contextPieces.push(`${label}:\n${section}`);
+  };
+
+  addCategories('Identity memories', snapshot.identityMemories);
+  addCategories('Preference memories', snapshot.preferenceMemories);
+  addCategories('Relationship memories', snapshot.relationshipMemories);
+  addCategories('Project memories', snapshot.projectMemories);
+  addCategories('Goal memories', snapshot.goalMemories);
+  addCategories('Relevant long-term memories', relevantLongTermMemories);
+
+  const prompt = [`Use the following memory context to answer user queries.`,
+    `Do not invent new facts.`,
+    `Only use the most important memories relevant to this conversation.`,
+    `Memory context:`,
+    contextPieces.join('\n\n')].join('\n\n');
+
+  return {
+    ...snapshot,
+    relevantLongTermMemories,
+    memoryContext: contextPieces,
+    prompt,
+  };
+}
+
 module.exports = {
   getOrCreateChat,
   saveRealtimeMessage,
@@ -210,4 +336,6 @@ module.exports = {
   deleteLongTerm,
   patchLongTerm,
   searchLongTermVectors,
+  getMemoryDiagnostics,
+  buildMemoryContext,
 };
