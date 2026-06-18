@@ -8,3 +8,4 @@ build
 .idea
 .env
 .env.local
+package-lock.json
