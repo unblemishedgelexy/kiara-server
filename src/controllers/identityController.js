@@ -67,7 +67,14 @@ async function processInteractionController(req, res, next) {
 async function learnPersonController(req, res, next) {
   try {
     const userId = req.userId; // From auth middleware
-    const { name, relationship, face_descriptor, voice_descriptor, voice_characteristics } = req.body;
+    const {
+      person_id,
+      name,
+      relationship,
+      face_descriptor,
+      voice_descriptor,
+      voice_characteristics,
+    } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: 'Name is required' });
@@ -75,6 +82,7 @@ async function learnPersonController(req, res, next) {
 
     const result = await realIdentityService.learnPerson(
       userId,
+      person_id,
       name,
       relationship || 'guest',
       face_descriptor,

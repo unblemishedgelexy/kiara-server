@@ -1,13 +1,67 @@
 const mongoose = require('mongoose');
 
-const LongTermMemorySchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  category: { type: String },
-  encryptedMemory: { type: String, required: true },
-  tags: [{ type: String }],
-  importanceScore: { type: Number, default: 0 },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-});
+const memorySchema = new mongoose.Schema(
+  {
+    userId: {
+      type: String,
+      required: true,
+      index: true
+    },
 
-module.exports = mongoose.model('LongTermMemory', LongTermMemorySchema);
+    category: {
+      type: String,
+      enum: [
+        'identity',
+        'preference',
+        'relationship',
+        'project',
+        'goal',
+        'event',
+        'fact'
+      ],
+      required: true
+    },
+
+    content: {
+      type: String,
+      required: true
+    },
+
+    importance: {
+      type: Number,
+      min: 0,
+      max: 1,
+      default: 0.5
+    },
+
+    accessCount: {
+      type: Number,
+      default: 0
+    },
+
+    memoryStrength: {
+      type: Number,
+      default: 1
+    },
+
+    lastAccessed: {
+      type: Date,
+      default: Date.now
+    },
+
+    emotionalWeight: {
+      type: Number,
+      min: 0,
+      max: 1,
+      default: 0
+    }
+  },
+  {
+    timestamps: true
+  }
+);
+
+memorySchema.index({ userId: 1, category: 1 });
+memorySchema.index({ userId: 1, importance: -1 });
+
+module.exports = mongoose.model('Memory', memorySchema);

@@ -10,6 +10,19 @@ const FACE_THRESHOLD = 0.55; // 55% similarity threshold for face
 const VOICE_THRESHOLD = 0.50; // 50% similarity threshold for voice
 const COMBINED_THRESHOLD = 0.65; // 65% for combined match
 
+// In-process locks to prevent concurrent duplicate creations for the same descriptors
+const creationLocks = new Map();
+
+// Per-user locks to serialize learning operations and avoid race conditions
+const userLocks = new Map();
+
+function makeLockKey(userId, personId, faceDescriptor, voiceDescriptor) {
+  if (personId) return `uid:${userId}|pid:${personId}`;
+  const f = Array.isArray(faceDescriptor) ? faceDescriptor.join(',') : 'null';
+  const v = Array.isArray(voiceDescriptor) ? voiceDescriptor.join(',') : 'null';
+  return `uid:${userId}|face:${f}|voice:${v}`;
+}
+
 /**
  * Extract real embeddings from frontend data
  */
@@ -56,6 +69,10 @@ async function recognizeFace(userId, faceDescriptor) {
     const isMatch = bestScore >= FACE_THRESHOLD;
 
     if (isMatch) {
+      if (!bestMatch.name) {
+        console.warn('Face recognition matched a profile with missing name for person_id', bestMatch._id.toString());
+      }
+
       // Update recognition history
       bestMatch.recognitionHistory.push({
         timestamp: new Date(),
@@ -73,10 +90,10 @@ async function recognizeFace(userId, faceDescriptor) {
       return {
         status: 'matched',
         person_id: bestMatch._id.toString(),
-        name: bestMatch.name,
+        name: bestMatch.name || 'Unknown person',
         relationship: bestMatch.relationship,
         confidence: bestScore,
-        message: `Recognized ${bestMatch.name} (${bestMatch.relationship})`,
+        message: `Recognized ${bestMatch.name || 'Unknown person'} (${bestMatch.relationship})`,
       };
     }
 
@@ -134,6 +151,10 @@ async function recognizeVoice(userId, voiceDescriptor, voiceCharacteristics) {
     const isMatch = bestScore >= VOICE_THRESHOLD;
 
     if (isMatch) {
+      if (!bestMatch.name) {
+        console.warn('Voice recognition matched a profile with missing name for person_id', bestMatch._id.toString());
+      }
+
       // Update recognition history
       bestMatch.recognitionHistory.push({
         timestamp: new Date(),
@@ -151,10 +172,10 @@ async function recognizeVoice(userId, voiceDescriptor, voiceCharacteristics) {
       return {
         status: 'matched',
         person_id: bestMatch._id.toString(),
-        name: bestMatch.name,
+        name: bestMatch.name || 'Unknown person',
         relationship: bestMatch.relationship,
         confidence: bestScore,
-        message: `Recognized ${bestMatch.name} by voice (${bestMatch.relationship})`,
+        message: `Recognized ${bestMatch.name || 'Unknown person'} by voice (${bestMatch.relationship})`,
       };
     }
 
@@ -234,6 +255,11 @@ async function processInteraction(userId, faceEmbedding, voiceEmbedding, voiceCh
     }
 
     if (matchedProfile) {
+      if (!matchedProfile.name) {
+        console.warn('processInteraction matched a profile with missing name for person_id', matchedProfile._id.toString());
+      }
+      const resolvedName = matchedProfile.name || 'Unknown person';
+
       // Update metrics
       matchedProfile.meetingsCount += 1;
       matchedProfile.lastMeeting = new Date();
@@ -262,14 +288,14 @@ async function processInteraction(userId, faceEmbedding, voiceEmbedding, voiceCh
 
       return {
         person_id: matchedProfile._id.toString(),
-        name: matchedProfile.name,
+        name: resolvedName,
         relationship: matchedProfile.relationship,
         meetings_count: matchedProfile.meetingsCount,
         voice_score: bestVoiceScore,
         face_score: bestFaceScore,
         relationship_score: getRelationshipScore(matchedProfile.relationship),
         overall_confidence: overallConfidence,
-        message: `Recognized ${matchedProfile.name}! Nice to see you again! (Meetings: ${matchedProfile.meetingsCount})`,
+        message: `Recognized ${resolvedName}! Nice to see you again! (Meetings: ${matchedProfile.meetingsCount})`,
         known: true,
         recognition_source: source.join(' + '),
       };
@@ -298,57 +324,192 @@ async function processInteraction(userId, faceEmbedding, voiceEmbedding, voiceCh
 /**
  * Learn/register a new person
  */
-async function learnPerson(userId, name, relationship, faceDescriptor, voiceDescriptor, voiceCharacteristics) {
+async function findProfileByDescriptors(userId, faceDescriptor, voiceDescriptor, voiceCharacteristics) {
+  const profiles = await PersonProfile.find({ userId });
+  let bestFaceMatch = null;
+  let bestVoiceMatch = null;
+  let bestFaceScore = 0;
+  let bestVoiceScore = 0;
+
+  for (const profile of profiles) {
+    if (faceDescriptor && Array.isArray(profile.faceDescriptor)) {
+      const score = calculateDescriptorSimilarity(faceDescriptor, profile.faceDescriptor);
+      if (score > bestFaceScore) {
+        bestFaceScore = score;
+        bestFaceMatch = profile;
+      }
+    }
+
+    if (voiceDescriptor && Array.isArray(profile.voiceDescriptor)) {
+      let score = calculateDescriptorSimilarity(voiceDescriptor, profile.voiceDescriptor);
+      if (voiceCharacteristics && profile.voiceCharacteristics) {
+        const charScore = compareVoiceCharacteristics(voiceCharacteristics, profile.voiceCharacteristics);
+        score = score * 0.6 + charScore * 0.4;
+      }
+      if (score > bestVoiceScore) {
+        bestVoiceScore = score;
+        bestVoiceMatch = profile;
+      }
+    }
+  }
+
+  const faceValid = bestFaceMatch && bestFaceScore >= FACE_THRESHOLD;
+  const voiceValid = bestVoiceMatch && bestVoiceScore >= VOICE_THRESHOLD;
+
+  if (faceValid && voiceValid && bestFaceMatch._id.equals(bestVoiceMatch._id)) {
+    return bestFaceMatch;
+  }
+
+  if (faceValid && voiceValid) {
+    // If both modalities match but point to different profiles, log a warning
+    // and return the one with the higher score. Do NOT create a new profile
+    // in this case to avoid duplicates; prefer the stronger match.
+    if (!bestFaceMatch._id.equals(bestVoiceMatch._id)) {
+      console.warn('Duplicate descriptor matches detected for user', userId, 'faceMatch=', bestFaceMatch._id.toString(), 'voiceMatch=', bestVoiceMatch._id.toString());
+    }
+    return bestFaceScore >= bestVoiceScore ? bestFaceMatch : bestVoiceMatch;
+  }
+
+  if (faceValid) {
+    return bestFaceMatch;
+  }
+
+  if (voiceValid) {
+    return bestVoiceMatch;
+  }
+
+  return null;
+}
+
+async function learnPerson(userId, personId, name, relationship, faceDescriptor, voiceDescriptor, voiceCharacteristics) {
   try {
-    // Check if person already exists
-    let profile = await PersonProfile.findOne({ userId, name });
+    let profile = null;
+    console.log('[learnPerson] start', userId, { personId, name });
 
-    if (profile) {
-      // Update existing profile
-      if (faceDescriptor) {
-        profile.faceDescriptor = faceDescriptor;
-        profile.faceEmbeddings.push({
-          vector: faceDescriptor,
-          timestamp: new Date(),
-          quality: 0.8,
-        });
-      }
-
-      if (voiceDescriptor) {
-        profile.voiceDescriptor = voiceDescriptor;
-        profile.voiceCharacteristics = voiceCharacteristics;
-        profile.voiceEmbeddings.push({
-          vector: voiceDescriptor,
-          timestamp: new Date(),
-          quality: 0.8,
-        });
-      }
-
-      profile.relationship = relationship;
-      profile.isLearned = true;
-      profile.learningLevel = Math.min(100, profile.learningLevel + 20);
+    // Acquire a per-user mutex to serialize learn operations for the same user.
+    const userLockKey = `user:${userId}`;
+    let releaseUser = null;
+    const existingUserLock = userLocks.get(userLockKey);
+    if (existingUserLock) {
+      // wait for the current in-flight operation for this user
+      await existingUserLock;
     } else {
-      // Create new profile
-      profile = new PersonProfile({
-        userId,
-        name,
-        relationship,
-        faceDescriptor: faceDescriptor || null,
-        voiceDescriptor: voiceDescriptor || null,
-        voiceCharacteristics: voiceCharacteristics || null,
-        isLearned: true,
-        learningLevel: 30,
-      });
+      // we become the owner for this user's operations
+      let rel;
+      const p = new Promise((res) => { rel = res; });
+      userLocks.set(userLockKey, p);
+      releaseUser = rel;
+    }
+    if (personId) {
+      profile = await PersonProfile.findById(personId);
+      if (profile && profile.userId !== userId) {
+        profile = null;
+      }
+    }
 
-      if (faceDescriptor) {
+    if (!profile) {
+      // First, try descriptor-similarity lookup (non-atomic)
+      console.log('[learnPerson] before findProfileByDescriptors', userId);
+      profile = await findProfileByDescriptors(userId, faceDescriptor, voiceDescriptor, voiceCharacteristics);
+      console.log('[learnPerson] after findProfileByDescriptors', userId, !!profile);
+    }
+
+    if (!profile) {
+      // Try atomic upserts using Mongo-like findOneAndUpdate with upsert:true
+      const makeDescriptorKey = (f, v) => {
+        if (f && v) return `f:${f.join(',')}|v:${v.join(',')}`;
+        if (f) return `f:${f.join(',')}`;
+        if (v) return `v:${v.join(',')}`;
+        return null;
+      };
+
+      const tryUpsert = async (filter, insertFields) => {
+        const setOnInsert = Object.assign({}, insertFields);
+        // ensure embeddings provided on insert
+        if (faceDescriptor && !setOnInsert.faceEmbeddings) {
+          setOnInsert.faceEmbeddings = [{ vector: faceDescriptor, timestamp: new Date(), quality: 0.8 }];
+          setOnInsert.faceDescriptor = faceDescriptor;
+        }
+        if (voiceDescriptor && !setOnInsert.voiceEmbeddings) {
+          setOnInsert.voiceEmbeddings = [{ vector: voiceDescriptor, timestamp: new Date(), quality: 0.8 }];
+          setOnInsert.voiceDescriptor = voiceDescriptor;
+        }
+
+        const update = { $setOnInsert: setOnInsert };
+        const options = { upsert: true, new: true };
+
+        try {
+          const doc = await PersonProfile.findOneAndUpdate(filter, update, options);
+          if (doc) return doc;
+        } catch (e) {
+          // fallthrough and continue trying other filters
+          console.warn('Upsert attempt failed:', e.message || e);
+        }
+
+        return null;
+      };
+
+      // Candidate filters: both descriptors, face-only, voice-only
+      const baseInsert = { userId, name: name || null, relationship: relationship || 'guest', isLearned: true, learningLevel: 30 };
+
+      // Use a deterministic descriptorKey to ensure identical filters across callers
+      const descriptorKey = makeDescriptorKey(faceDescriptor, voiceDescriptor);
+      if (descriptorKey) {
+        const filter = { userId, descriptorKey };
+        const insertFields = Object.assign({}, baseInsert, { descriptorKey });
+        // also include raw descriptors on insert for compatibility
+        if (faceDescriptor) insertFields.faceDescriptor = faceDescriptor;
+        if (voiceDescriptor) insertFields.voiceDescriptor = voiceDescriptor;
+        console.log('[learnPerson] attempting upsert for', filter);
+        profile = await tryUpsert(filter, insertFields);
+        console.log('[learnPerson] upsert result', !!profile, profile && profile._id && profile._id.toString());
+      }
+
+      // If still not found, create a new profile (should be rare)
+      if (!profile) {
+        profile = new PersonProfile({
+          userId,
+          name,
+          relationship,
+          faceDescriptor: faceDescriptor || null,
+          voiceDescriptor: voiceDescriptor || null,
+          voiceCharacteristics: voiceCharacteristics || null,
+          isLearned: true,
+          learningLevel: 30,
+        });
+        profile = await profile.save();
+      }
+    }
+
+    if (name) {
+      profile.name = name;
+    }
+
+    profile.relationship = relationship || profile.relationship || 'guest';
+    profile.isLearned = true;
+    profile.learningLevel = Math.min(100, (profile.learningLevel || 0) + 20);
+
+    if (faceDescriptor) {
+      profile.faceDescriptor = faceDescriptor;
+      profile.faceEmbeddings = profile.faceEmbeddings || [];
+      // Avoid duplicate embeddings
+      const existsFace = profile.faceEmbeddings.some((e) => JSON.stringify(e.vector) === JSON.stringify(faceDescriptor));
+      if (!existsFace) {
         profile.faceEmbeddings.push({
           vector: faceDescriptor,
           timestamp: new Date(),
           quality: 0.8,
         });
       }
+    }
 
-      if (voiceDescriptor) {
+    if (voiceDescriptor) {
+      profile.voiceDescriptor = voiceDescriptor;
+      profile.voiceCharacteristics = voiceCharacteristics || profile.voiceCharacteristics;
+      profile.voiceEmbeddings = profile.voiceEmbeddings || [];
+      // Avoid duplicate embeddings
+      const existsVoice = profile.voiceEmbeddings.some((e) => JSON.stringify(e.vector) === JSON.stringify(voiceDescriptor));
+      if (!existsVoice) {
         profile.voiceEmbeddings.push({
           vector: voiceDescriptor,
           timestamp: new Date(),
@@ -357,7 +518,14 @@ async function learnPerson(userId, name, relationship, faceDescriptor, voiceDesc
       }
     }
 
-    await profile.save();
+    profile = await profile.save();
+    console.log('[learnPerson] saved profile', profile._id.toString());
+    
+    // release user lock before returning
+    if (releaseUser) {
+      try { releaseUser(); } catch (e) { /* ignore */ }
+      userLocks.delete(userLockKey);
+    }
 
     return {
       success: true,
@@ -365,7 +533,7 @@ async function learnPerson(userId, name, relationship, faceDescriptor, voiceDesc
       name: profile.name,
       relationship: profile.relationship,
       learned_modalities: (faceDescriptor ? ['face'] : []).concat(voiceDescriptor ? ['voice'] : []),
-      message: `Learned ${name} (${relationship})`,
+      message: `Learned ${profile.name} (${profile.relationship})`,
     };
   } catch (error) {
     console.error('Learn person error:', error);

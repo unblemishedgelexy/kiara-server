@@ -1,12 +1,47 @@
 const mongoose = require('mongoose');
 
-const ShortTermMemorySchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  sessionId: { type: String, required: true, index: true },
-  role: { type: String },
-  message: { type: String },
-  timestamp: { type: Date, default: Date.now },
-  expiresAt: { type: Date, index: { expires: 0 } }
-});
+const shortTermMemorySchema = new mongoose.Schema(
+  {
+    userId: {
+      type: String,
+      required: true,
+      index: true
+    },
 
-module.exports = mongoose.model('ShortTermMemory', ShortTermMemorySchema);
+    content: {
+      type: String,
+      required: true
+    },
+
+    importance: {
+      type: Number,
+      min: 0,
+      max: 1,
+      default: 0.3
+    },
+
+    accessCount: {
+      type: Number,
+      default: 0
+    },
+
+    expiresAt: {
+      type: Date,
+      default: () => new Date(Date.now() + 24 * 60 * 60 * 1000)
+    }
+  },
+  {
+    timestamps: true
+  }
+);
+
+// automatic forgetting
+shortTermMemorySchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0 }
+);
+
+module.exports = mongoose.model(
+  'ShortTermMemory',
+  shortTermMemorySchema
+);

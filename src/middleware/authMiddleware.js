@@ -21,9 +21,9 @@ function authMiddleware(req, res, next) {
   }
 
   try {
-    console.debug('[authMiddleware] Verifying token for', req.method, req.path);
+    
     const payload = verifyAccessToken(token);
-    console.debug('[authMiddleware] Token verified successfully for user', payload.sub);
+    
     attachAuthUser(req, payload);
     next();
   } catch (err) {
