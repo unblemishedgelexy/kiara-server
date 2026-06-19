@@ -1,10 +1,10 @@
 const express = require('express');
-const { createLiveEphemeralToken } = require('../services/liveTokenService');
+const { createLiveEphemeralToken } = require('../services/../services/live/liveTokenService');
 const { env } = require('../config/env');
 const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
-const geminiHealth = require('../services/geminiHealth');
+const geminiHealth = require('../services/../services/live/geminiHealth');
 
 router.get('/health', async (_req, res) => {
   const health = geminiHealth.getStatus();

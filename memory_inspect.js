@@ -33,7 +33,7 @@ const log = (...args) => console.log(...args);
     client.on('error', (e) => log('Redis error', e.toString()));
     await client.connect();
     log('Redis connected');
-    const keys = await client.keys('memory:short:*');
+    const keys = await client.keys('memory:short:*:*');
     log('Redis keys count', keys.length, keys.slice(0, 20));
     for (const key of keys.slice(0, 5)) {
       const values = await client.lRange(key, 0, -1);

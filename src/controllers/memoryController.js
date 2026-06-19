@@ -1,11 +1,11 @@
-const memoryPipelineService = require('../services/memoryPipelineService');
-const sessionBootstrapService = require('../services/sessionBootstrapService');
-const conversationStateService = require('../services/conversationStateService');
-const memoryProfileService = require('../services/memoryProfileService');
-const continuityService = require('../services/continuityService');
-const memoryHealthService = require('../services/memoryHealthService');
-const memoryAnalyticsService = require('../services/memoryAnalyticsService');
-const continuityRestorationService = require('../services/continuityRestorationService');
+const memoryPipelineService = require('../services/memory/memoryPipelineService');
+const sessionBootstrapService = require('../services/memory/sessionBootstrapService');
+const conversationStateService = require('../services/memory/conversationStateService');
+const memoryProfileService = require('../services/memory/memoryProfileService');
+const continuityService = require('../services/memory/continuityService');
+const memoryHealthService = require('../services/memory/memoryHealthService');
+const memoryAnalyticsService = require('../services/memory/memoryAnalyticsService');
+const continuityRestorationService = require('../services/memory/continuityRestorationService');
 
 async function processMemory(req, res, next) {
   try {
@@ -20,7 +20,8 @@ async function processMemory(req, res, next) {
 async function getBootstrap(req, res, next) {
   try {
     const userId = req.userId;
-    const data = await sessionBootstrapService.buildSessionBootstrapContext(userId);
+    const forceRefresh = String(req.query.refresh || req.query.forceRefresh || '').toLowerCase() === 'true';
+    const data = await sessionBootstrapService.buildSessionBootstrapContext(userId, forceRefresh);
     res.json({ success: true, data });
   } catch (err) { next(err); }
 }
@@ -72,7 +73,7 @@ async function debugMemoryFull(req, res, next) {
     const diagnostics = await memoryPipelineService.getMemoryDiagnostics(userId);
     const profile = await memoryProfileService.getMemoryProfile(userId);
     const conversationState = await conversationStateService.getConversationState(userId);
-    const bootstrap = await require('../services/bootstrapCacheService').getBootstrapContext(userId).catch(() => null);
+    const bootstrap = await require('../services/memory/bootstrapCacheService').getBootstrapContext(userId).catch(() => null);
     res.json({ success: true, data: { diagnostics, profile, conversationState, bootstrap } });
   } catch (err) { next(err); }
 }

@@ -12,7 +12,7 @@ const identityRoutes = require('./routes/identityRoutes');
 const emailController = require('./controllers/emailController');
 const security = require('./middleware/security');
 const errorHandler = require('./middleware/errorHandler');
-const { isAllowedCorsOrigin } = require('./config/env');
+const { env, isAllowedCorsOrigin } = require('./config/env');
 
 const createApp = () => {
   const app = express();
@@ -20,7 +20,7 @@ const createApp = () => {
 
   // Start background gemini health poller so /auth/token health can be reported
   try {
-    const geminiHealth = require('./services/geminiHealth');
+    const geminiHealth = require('./services/live/geminiHealth');
     geminiHealth.startPoll();
   } catch (e) {
     console.warn('Failed to start gemini health poller', e);
@@ -28,10 +28,20 @@ const createApp = () => {
 
   // start session prefetch worker for continuity
   try {
-    const prefetch = require('./services/sessionPrefetchWorker');
+    const prefetch = require('./services/workers/sessionPrefetchWorker');
     prefetch.start();
   } catch (e) {
     console.warn('Failed to start session prefetch worker', e);
+  }
+
+  // start promotion worker for queued memory promotions
+  try {
+    if (env.enablePromotionWorker) {
+      const promotionWorker = require('./services/workers/promotionWorkerService');
+      promotionWorker.start();
+    }
+  } catch (e) {
+    console.warn('Failed to start promotion worker', e);
   }
 
   app.use(cors({

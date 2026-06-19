@@ -1,4 +1,4 @@
-const { sendTestEmail, getEmailTransportDiagnostics, formatErrorDetails } = require('../services/emailService');
+const { sendTestEmail, getEmailTransportDiagnostics, formatErrorDetails } = require('../services/../services/infrastructure/emailService');
 
 async function testEmail(req, res) {
   const to = typeof req.query?.to === 'string' ? req.query.to.trim() : null;

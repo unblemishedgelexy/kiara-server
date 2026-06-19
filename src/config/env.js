@@ -81,6 +81,9 @@ const env = {
   redisPassword: readEnv('REDIS_PASSWORD', ''),
   enablePinecone: readEnv('ENABLE_PINECONE', 'true').toLowerCase() === 'true',
   enableQueue: readEnv('ENABLE_QUEUE', 'true').toLowerCase() === 'true',
+  enablePromotionWorker: readEnv('ENABLE_PROMOTION_WORKER', 'true').toLowerCase() === 'true',
+  promotionWorkerIntervalMs: readNumber('PROMOTION_WORKER_INTERVAL_MS', 30000),
+  promotionWorkerLimit: readNumber('PROMOTION_WORKER_LIMIT', 20),
   enableProfileCache: readEnv('ENABLE_PROFILE_CACHE', 'true').toLowerCase() === 'true',
   enableUnfinishedContext: readEnv('ENABLE_UNFINISHED_CONTEXT', 'true').toLowerCase() === 'true',
   bootstrapVersion: readNumber('BOOTSTRAP_VERSION', 1),
@@ -94,6 +97,8 @@ const env = {
   imagekitPrivateKey: readEnv('IMAGEKIT_PRIVATE_KEY', ''),
   imagekitUrlEndpoint: readEnv('IMAGEKIT_URL_ENDPOINT', ''),
   imagekitFolder: readEnv('IMAGEKIT_FOLDER', '/profiles'),
+  // Silence non-error console output when true
+  silenceConsole: readEnv('SILENCE_CONSOLE', 'true').toLowerCase() === 'true',
 };
 
 function isProductionEnv() {

@@ -1,6 +1,6 @@
-const authService = require('../services/authService');
-const { verifyRefreshToken } = require('../services/tokenService');
-const googleOAuthService = require('../services/googleOAuthService');
+const authService = require('../services/../services/auth/authService');
+const { verifyRefreshToken } = require('../services/../services/auth/tokenService');
+const googleOAuthService = require('../services/../services/auth/googleOAuthService');
 
 
 function buildAuthPayload(user, accessToken, refreshToken) {

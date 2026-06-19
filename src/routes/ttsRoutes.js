@@ -1,6 +1,6 @@
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
-const { streamElevenLabsSpeech } = require('../services/elevenLabsService');
+const { streamElevenLabsSpeech } = require('../services/../services/live/elevenLabsService');
 
 const router = express.Router();
 

@@ -8,7 +8,7 @@
  * - Input sanitization
  */
 
-const authServiceV2 = require('../services/authServiceV2');
+const authServiceV2 = require('../services/../services/auth/authServiceV2');
 
 // Validation middleware for registration
 function validateRegisterRequest(req, res, next) {

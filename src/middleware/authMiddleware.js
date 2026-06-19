@@ -1,4 +1,4 @@
-const { verifyAccessToken } = require('../services/tokenService');
+const { verifyAccessToken } = require('../services/../services/auth/tokenService');
 const { extractBearerToken } = require('../utils/authCookies');
 
 function readRequestToken(req) {

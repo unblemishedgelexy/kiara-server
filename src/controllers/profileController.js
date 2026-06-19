@@ -1,6 +1,6 @@
 const UserModel = require('../models/User');
 const path = require('path');
-const { removeFile, uploadsDir } = require('../services/uploadService');
+const { removeFile, uploadsDir } = require('../services/../services/infrastructure/uploadService');
 const { uploadFileToImageKit } = require('../services/imageService');
 
 async function getProfile(req, res, next) {

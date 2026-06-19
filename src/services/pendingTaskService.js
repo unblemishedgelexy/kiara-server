@@ -1,4 +1,4 @@
-const conversationStateService = require('./conversationStateService');
+const conversationStateService = require('./memory/conversationStateService');
 
 function extractTasks(text) {
   if (!text) return [];

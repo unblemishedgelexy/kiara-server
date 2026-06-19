@@ -1,7 +1,7 @@
-const memoryProfileService = require('../services/memoryProfileService');
-const conversationStateService = require('../services/conversationStateService');
-const sessionMemoryService = require('../services/sessionMemoryService');
-const sessionBootstrapService = require('../services/sessionBootstrapService');
+const memoryProfileService = require('../services/../services/memory/memoryProfileService');
+const conversationStateService = require('../services/../services/memory/conversationStateService');
+const sessionMemoryService = require('../services/../services/memory/sessionMemoryService');
+const sessionBootstrapService = require('../services/../services/memory/sessionBootstrapService');
 
 async function debugOverview(req, res, next) {
   try {

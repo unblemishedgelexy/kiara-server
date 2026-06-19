@@ -10,8 +10,8 @@
  * POST /api/auth/logout - Logout
  */
 
-const authServiceV2 = require('../services/authServiceV2');
-const { verifyRefreshToken } = require('../services/tokenService');
+const authServiceV2 = require('../services/../services/auth/authServiceV2');
+const { verifyRefreshToken } = require('../services/../services/auth/tokenService');
 const UserModel = require('../models/User');
 
 // ============= REGISTRATION =============

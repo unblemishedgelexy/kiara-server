@@ -1,8 +1,8 @@
 const Joi = require('joi');
-const { createOTP, verifyOTP, sendOTP, resendOTP } = require('../services/otpService');
-const authService = require('../services/authService');
-const pendingRegistrationService = require('../services/pendingRegistrationService');
-const { createPasswordResetToken } = require('../services/passwordResetService');
+const { createOTP, verifyOTP, sendOTP, resendOTP } = require('../services/../services/auth/otpService');
+const authService = require('../services/../services/auth/authService');
+const pendingRegistrationService = require('../services/../services/auth/pendingRegistrationService');
+const { createPasswordResetToken } = require('../services/../services/auth/passwordResetService');
 const { OTP_TYPES, REGISTER_OTP_TYPES, FORGOT_PASSWORD_OTP_TYPES, CHANGE_OTP_TYPES, isEmailOtpType } = require('../config/otpTypes');
 const { env, isProductionEnv } = require('../config/env');
 

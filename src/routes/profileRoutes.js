@@ -3,7 +3,7 @@ const authMiddleware = require('../middleware/authMiddleware');
 const { getProfile, updateProfile, uploadProfilePicture } = require('../controllers/profileController');
 const { requestEmailVerificationOTP, verifyEmailOTPFromProfile } = require('../controllers/authControllerV2');
 const authValidation = require('../middleware/authValidation');
-const { upload } = require('../services/uploadService');
+const { upload } = require('../services/../services/infrastructure/uploadService');
 
 const router = express.Router();
 

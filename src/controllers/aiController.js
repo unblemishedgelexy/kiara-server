@@ -1,4 +1,4 @@
-const { generateText } = require('../services/geminiService');
+const { generateText } = require('../services/../services/live/geminiService');
 
 async function generateTextController(req, res, next) {
   try {

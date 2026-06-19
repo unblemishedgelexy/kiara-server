@@ -1,5 +1,5 @@
-const authService = require('../services/authService');
-const { verifyPasswordResetToken, consumePasswordResetToken } = require('../services/passwordResetService');
+const authService = require('../services/../services/auth/authService');
+const { verifyPasswordResetToken, consumePasswordResetToken } = require('../services/../services/auth/passwordResetService');
 const UserModel = require('../models/User');
 
 async function resetPassword(req, res, next) {
