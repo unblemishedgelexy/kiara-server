@@ -11,15 +11,40 @@ function normalizeEntry(token) {
   return String(token || '').trim().replace(/\s+/g, ' ');
 }
 
+const GENERIC_PERSON_NAMES = new Set([
+  'my',
+  'me',
+  'friend',
+  'buddy',
+  'someone',
+  'unknown',
+  'dummy',
+  'example',
+  'test',
+  'filler',
+]);
+
 function parseRelationshipMemory(memoryText) {
   const normalized = String(memoryText || '').trim();
-  const nameMatch = normalized.match(/([A-Z][a-z]+(?: [A-Z][a-z]+)*)/);
+  const explicitMatch = normalized.match(/\b(?:relationship:\s*)?(?:my\s+)?(?:best\s+)?(?:friend|wife|husband|partner|colleague|coworker|boss|manager|mentor|mentee|family member|family|sibling|cousin|mother|father|dad|mom|uncle|aunt)\s*(?:is|named|called|who\s+is|who's|was|,)?\s*([A-Z][a-z]+(?: [A-Z][a-z]+)*)/i);
+  const fallbackMatch = normalized.match(/([A-Z][a-z]+(?: [A-Z][a-z]+)*)/);
+  const personNameCandidate = explicitMatch ? normalizeEntry(explicitMatch[1]) : fallbackMatch ? normalizeEntry(fallbackMatch[1]) : null;
+  const personName = personNameCandidate && !GENERIC_PERSON_NAMES.has(personNameCandidate.toLowerCase()) ? personNameCandidate : null;
   const typeMatch = normalized.match(/\b(best friend|friend|family|family member|coworker|colleague|partner|project partner|boss|manager|mentor|mentee)\b/i);
 
+  let confidence = 0;
+  if (personName) {
+    confidence = explicitMatch ? 0.9 : 0.6;
+    if (!typeMatch && normalized.split(' ').length <= 3) {
+      confidence = Math.min(confidence, 0.5);
+    }
+  }
+
   return {
-    personName: nameMatch ? normalizeEntry(nameMatch[1]) : null,
+    personName,
     relationshipType: typeMatch ? typeMatch[1].toLowerCase() : 'relationship',
     rawText: normalized,
+    confidence,
   };
 }
 
@@ -86,4 +111,4 @@ async function deleteRelationshipContext(userId) {
   return result > 0;
 }
 
-module.exports = { cacheRelationshipContext, getRelationshipContext, deleteRelationshipContext };
+module.exports = { cacheRelationshipContext, getRelationshipContext, deleteRelationshipContext, parseRelationshipMemory };

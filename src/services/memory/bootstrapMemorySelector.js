@@ -13,21 +13,35 @@ function scoreMemory(memory, query = '') {
     const lowerQuery = String(query).toLowerCase();
     const text = `${memory.category} ${memory.tags?.join(' ')} ${memory.memory}`.toLowerCase();
     if (text.includes(lowerQuery)) score += 2;
+    const terms = lowerQuery.split(/\s+/).filter(Boolean);
+    for (const term of terms) {
+      if (term && text.includes(term)) score += 1;
+    }
   }
   return score;
 }
 
+async function retrievePreferredMemories(userId) {
+  if (typeof memoryRetrievalService.retrieveCategoryMemories === 'function') {
+    return memoryRetrievalService.retrieveCategoryMemories(userId, ['identity', 'relationship', 'goal', 'project']).catch(() => []);
+  }
+
+  const [identity, relationship, goal, project] = await Promise.all([
+    memoryRetrievalService.retrieveIdentityMemories(userId).catch(() => []),
+    memoryRetrievalService.retrieveRelationshipMemories(userId).catch(() => []),
+    memoryRetrievalService.retrieveGoalMemories(userId).catch(() => []),
+    memoryRetrievalService.retrieveProjectMemories(userId).catch(() => []),
+  ]);
+  return [...identity, ...relationship, ...goal, ...project];
+}
+
 async function selectBootstrapMemories(userId, limit = 20, query = '') {
-  const preferredCategories = ['identity', 'relationship', 'goal', 'project'];
-
-  const categoryMemorySets = await Promise.all(
-    preferredCategories.map((category) => memoryRetrievalService.retrieveCategoryMemories(userId, [category]))
-  );
-
-  const preferredMemories = categoryMemorySets.flat();
+  const preferredMemories = await retrievePreferredMemories(userId);
   const uniquePreferred = [];
   const seenIds = new Set();
+
   for (const memory of preferredMemories) {
+    if (!memory || !memory.id) continue;
     if (!seenIds.has(memory.id)) {
       seenIds.add(memory.id);
       uniquePreferred.push(memory);
@@ -43,7 +57,7 @@ async function selectBootstrapMemories(userId, limit = 20, query = '') {
   }
 
   const fallback = await memoryRetrievalService.retrieveRelevantMemories(userId, query);
-  const fallbackUnique = fallback.filter((memory) => !seenIds.has(memory.id));
+  const fallbackUnique = fallback.filter((memory) => memory && memory.id && !seenIds.has(memory.id));
   const scoredFallback = fallbackUnique.map((memory) => ({ memory, score: scoreMemory(memory, query) }));
   scoredFallback.sort((a, b) => b.score - a.score);
   const fallbackSelection = scoredFallback.slice(0, limit - selected.length).map((item) => item.memory);

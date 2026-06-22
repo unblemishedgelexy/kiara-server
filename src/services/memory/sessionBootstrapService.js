@@ -9,20 +9,24 @@ const bootstrapCacheService = require('./bootstrapCacheService');
 
 async function buildBootstrapPayload(userId) {
 	const profile = await memoryProfileService.getMemoryProfile(userId);
-	const compressed = profileCompressionService.compressProfile(profile);
-	const selectedMemories = await bootstrapMemorySelector.selectBootstrapMemories(
-		userId,
-		20,
-		[profile?.identitySummary, profile?.preferenceSummary, profile?.relationshipSummary, profile?.projectSummary, profile?.goalSummary]
-			.filter(Boolean)
-			.join(' ')
-	);
-	const [conversationState, activeSession] = await Promise.all([
+	const profileSummaryText = [
+		profile?.identitySummary,
+		profile?.preferenceSummary,
+		profile?.relationshipSummary,
+		profile?.projectSummary,
+		profile?.goalSummary,
+	].filter(Boolean).join(' ');
+
+	const startMs = Date.now();
+	const [selectedMemories, conversationState, activeSession, resumeArgs] = await Promise.all([
+		bootstrapMemorySelector.selectBootstrapMemories(userId, 20, profileSummaryText),
 		conversationStateService.getConversationState(userId),
 		sessionMemoryService.getActiveSessionMemory(userId),
+		sessionResumeService.getResumeContext(userId),
 	]);
-	const resumeArgs = await sessionResumeService.getResumeContext(userId);
+
 	const resumeContext = sessionResumeService.buildResumeContext(resumeArgs);
+	const compressed = profileCompressionService.compressProfile(profile);
 
 	const contextPieces = [];
 	if (compressed.compressedProfile) {
@@ -48,7 +52,9 @@ async function buildBootstrapPayload(userId) {
 		conversationState,
 		activeSession,
 		bootstrapVersion: env.bootstrapVersion,
-		lastUpdated: new Date().toISOString(),
+		bootstrapTimestamp: new Date().toISOString(),
+		builtAt: new Date().toISOString(),
+		buildDurationMs: Date.now() - startMs,
 	};
 }
 

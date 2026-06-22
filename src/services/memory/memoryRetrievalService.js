@@ -66,6 +66,7 @@ async function retrieveGoalMemories(userId) {
 
 module.exports = {
   retrieveRelevantMemories,
+  retrieveCategoryMemories,
   retrieveIdentityMemories,
   retrievePreferenceMemories,
   retrieveProjectMemories,

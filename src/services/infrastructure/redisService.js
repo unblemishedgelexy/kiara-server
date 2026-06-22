@@ -6,33 +6,59 @@ let redisClient = null;
 async function initRedis() {
   if (redisClient) return redisClient;
 
-  try {
-    const options = {};
-
-    if (env.redisUrl) {
-      options.url = env.redisUrl;
-      console.log('Redis using REDIS_URL for connection');
-    } else {
-      options.socket = {
-        host: env.redisHost,
-        port: env.redisPort,
-      };
-      options.database = env.redisDb;
-
-      if (env.redisPassword) {
-        options.password = env.redisPassword;
-      }
-    }
-
-    redisClient = redis.createClient(options);
-
-    redisClient.on('error', (err) => {
+  async function connectClient(options, description) {
+    const client = redis.createClient(options);
+    client.on('error', (err) => {
       console.error('Redis Client Error:', err);
     });
 
-    await redisClient.connect();
-    const pingResult = await redisClient.ping();
-    console.log(`Redis connected successfully (${pingResult})`);
+    await client.connect();
+    const pingResult = await client.ping();
+    console.log(`Redis connected successfully (${pingResult}) using ${description}`);
+    return client;
+  }
+
+  const buildSocketOptions = () => {
+    const options = {
+      socket: {
+        host: env.redisHost,
+        port: env.redisPort,
+      },
+      database: env.redisDb,
+    };
+
+    if (env.redisPassword) {
+      options.password = env.redisPassword;
+    }
+
+    return options;
+  };
+
+  try {
+    if (env.redisUrl) {
+      try {
+        console.log('Redis using REDIS_URL for connection');
+        redisClient = await connectClient({ url: env.redisUrl }, 'REDIS_URL');
+        return redisClient;
+      } catch (urlError) {
+        console.error('Failed to initialize Redis with REDIS_URL:', urlError);
+        if (env.redisHost) {
+          try {
+            console.log('Falling back to Redis host/port connection');
+            redisClient = await connectClient(buildSocketOptions(), 'host/port');
+            return redisClient;
+          } catch (socketError) {
+            console.error('Failed to initialize Redis with host/port fallback:', socketError);
+            throw socketError;
+          }
+        }
+        throw urlError;
+      }
+    }
+
+    console.log('Redis using host/port for connection');
+    const options = buildSocketOptions();
+    redisClient = await connectClient(options, 'host/port');
     return redisClient;
   } catch (error) {
     console.error('Failed to initialize Redis:', error);

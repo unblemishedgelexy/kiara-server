@@ -26,11 +26,42 @@ const personProfileSchema = new mongoose.Schema(
       required: true
     },
 
+    nameLower: {
+      type: String,
+      required: true,
+      lowercase: true,
+      index: true,
+    },
+
     relationship: {
       type: String,
-      enum: ['family', 'friend', 'colleague', 'guest', 'unknown'],
+      enum: ['family', 'friend', 'colleague', 'guest', 'unknown', 'team', 'partner', 'mentor', 'other'],
       default: 'guest'
     },
+    mentionCount: {
+      type: Number,
+      default: 0,
+      index: true,
+    },
+    importanceScore: {
+      type: Number,
+      min: 0,
+      max: 1,
+      default: 0.5,
+    },
+    relatedPeople: {
+      type: [String],
+      default: [],
+    },
+    accessCount: {
+      type: Number,
+      default: 0,
+    },
+    facts: {
+      type: [String],
+      default: [],
+    },
+    lastMentioned: Date,
 
     faceEmbeddings: [embeddingSchema],
     voiceEmbeddings: [embeddingSchema],

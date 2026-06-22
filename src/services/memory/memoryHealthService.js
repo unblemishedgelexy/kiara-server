@@ -27,7 +27,7 @@ async function getPineconeHealth() {
 }
 
 async function getMemoryHealth() {
-  const [mongoConnected, redisConnected, pineconeConnected, memoryCount, profileCount, activeSessions, queuePending, queueFailed, promotionQueued, promotionFailed, promotionDeadLetter, bootstrapCount, unfinishedContextCount] = await Promise.all([
+  const [mongoConnected, redisConnected, pineconeConnected, memoryCount, profileCount, activeSessions, queuePending, queueProcessing, queueCompleted, queueFailed, promotionQueued, promotionFailed, promotionDeadLetter, bootstrapCount, unfinishedContextCount] = await Promise.all([
     Promise.resolve(mongoose.connection.readyState === 1),
     getRedisHealth(),
     getPineconeHealth(),
@@ -35,6 +35,8 @@ async function getMemoryHealth() {
     MemoryProfile.countDocuments(),
     redisService.getRedisClient().then((client) => client.keys('session:active:*')).then((keys) => keys.length).catch(() => 0),
     MemoryJob.countDocuments({ status: 'pending' }),
+    MemoryJob.countDocuments({ status: 'processing' }),
+    MemoryJob.countDocuments({ status: 'completed' }),
     MemoryJob.countDocuments({ status: 'failed' }),
     PromotionJob.countDocuments({ status: 'queued' }),
     PromotionJob.countDocuments({ status: 'failed' }),
@@ -51,6 +53,8 @@ async function getMemoryHealth() {
     profileCount,
     activeSessions,
     queuePending,
+    queueProcessing,
+    queueCompleted,
     queueFailed,
     promotionQueued,
     promotionFailed,

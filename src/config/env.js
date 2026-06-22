@@ -37,6 +37,8 @@ const defaultClientOrigins = [
   'ionic://localhost',
 ];
 
+const nodeEnv = readEnv('NODE_ENV', 'development');
+
 const env = {
   clientOrigins: mergeLists(
     defaultClientOrigins,
@@ -71,7 +73,7 @@ const env = {
   ),
   aesSecret: readEnv('AES_SECRET', 'aes-secret-32-bytes-length!!'),
   mongoUri: readEnv('MONGODB_URI', 'mongodb://127.0.0.1:27017/kiara_ai'),
-  nodeEnv: readEnv('NODE_ENV', 'development'),
+  nodeEnv,
   port: readNumber('PORT', 4000),
   // Redis Configuration for Short-term Memory
   redisHost: readEnv('REDIS_HOST', 'localhost'),
@@ -81,11 +83,13 @@ const env = {
   redisPassword: readEnv('REDIS_PASSWORD', ''),
   enablePinecone: readEnv('ENABLE_PINECONE', 'true').toLowerCase() === 'true',
   enableQueue: readEnv('ENABLE_QUEUE', 'true').toLowerCase() === 'true',
+  certificationMode: readEnv('CERTIFICATION_MODE', 'false').toLowerCase() === 'true',
   enablePromotionWorker: readEnv('ENABLE_PROMOTION_WORKER', 'true').toLowerCase() === 'true',
   promotionWorkerIntervalMs: readNumber('PROMOTION_WORKER_INTERVAL_MS', 30000),
   promotionWorkerLimit: readNumber('PROMOTION_WORKER_LIMIT', 20),
   enableProfileCache: readEnv('ENABLE_PROFILE_CACHE', 'true').toLowerCase() === 'true',
   enableUnfinishedContext: readEnv('ENABLE_UNFINISHED_CONTEXT', 'true').toLowerCase() === 'true',
+  enableMemoryLab: readEnv('ENABLE_MEMORY_LAB', nodeEnv === 'production' ? 'false' : 'true').toLowerCase() === 'true',
   bootstrapVersion: readNumber('BOOTSTRAP_VERSION', 1),
   // Memory TTL Configuration
   shortTermMemoryTTL: readNumber('SHORT_TERM_MEMORY_TTL', 3600), // 1 hour

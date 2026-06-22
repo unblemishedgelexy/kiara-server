@@ -93,7 +93,7 @@ async function processMemoryJobs(limit = 10) {
       await processJob(job);
       await memoryJobService.markJobCompleted(job._id);
     } catch (error) {
-      await memoryJobService.markJobFailed(job._id, error.message);
+      await memoryJobService.markJobFailedWithStack(job._id, error);
     }
   }
 

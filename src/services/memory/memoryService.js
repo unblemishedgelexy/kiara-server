@@ -9,6 +9,7 @@ const { encrypt, decrypt } = require('../../utils/crypto');
 const redisService = require('../infrastructure/redisService');
 const pineconeService = require('../pineconeService');
 const memoryRetrievalService = require('./memoryRetrievalService');
+const nameRecallService = require('./nameRecallService');
 const ConversationState = require('../../models/ConversationState');
 const sessionMemoryService = require('./sessionMemoryService');
 const { env } = require('../../config/env');
@@ -135,6 +136,7 @@ async function analyzeAndSaveLongTerm({ userId, text }) {
   });
 
   await persistLongTermToPinecone(doc, analysis);
+  nameRecallService.upsertMemoryNameIndices(userId, String(doc._id), analysis.memory, doc.category).catch(() => null);
   return { stored: true, doc, analysis };
 }
 

@@ -69,6 +69,9 @@ const memorySchema = new mongoose.Schema(
     },
     confidence: { type: Number, min: 0, max: 1, default: 0.5 },
     fingerprint: { type: String, index: true },
+    active: { type: Boolean, default: true, index: true },
+    obsolete: { type: Boolean, default: false, index: true },
+    supersededBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Memory' },
   },
   {
     timestamps: true,

@@ -13,8 +13,18 @@ const pineconeService = require('../pineconeService');
 const memoryJobService = require('./memoryJobService');
 const unfinishedContextService = require('./unfinishedContextService');
 const promotionQueueService = require('./promotionQueueService');
+const memoryIsolationValidator = require('./memoryIsolationValidator');
+const memoryIntakeService = require('./memoryIntakeService');
 
 const DEEP_MEMORY_CATEGORIES = ['identity', 'project', 'goal', 'relationship', 'fact'];
+
+function createTraceEvent(step, details = {}) {
+  return {
+    timestamp: new Date().toISOString(),
+    step,
+    details,
+  };
+}
 
 function normalizeTextForEmbedding(text) {
   return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -59,7 +69,10 @@ function buildStateUpdate({ existingState = {}, text, role }) {
 }
 
 async function persistPineconeVectors(doc, memoryText) {
-  if (!env.enablePinecone || !pineconeService.isPineconeConfigured()) return;
+  if (!env.enablePinecone || !pineconeService.isPineconeConfigured()) {
+    console.warn('[PINECONE_SKIPPED] Pinecone disabled or not configured for userId=' + String(doc.userId));
+    return;
+  }
   if (!DEEP_MEMORY_CATEGORIES.includes(doc.category)) return;
 
   const vector = createTextEmbedding(memoryText);
@@ -79,14 +92,37 @@ async function persistPineconeVectors(doc, memoryText) {
 }
 
 async function processUserMessage({ userId, sessionId, text, role = 'user' }) {
-  const extracted = memoryExtractor.extractAll(text || '');
-  const filteredExtracted = memoryFilterService.filterExtractedMemories(extracted, text);
+  const { userId: safeUserId, sessionId: safeSessionId } = memoryIsolationValidator.validateMemoryOperation({ userId, sessionId });
 
-  if (extracted.length > filteredExtracted.length) {
-    await memoryMetricsService.incrementFilteredMemoryCount(userId, extracted.length - filteredExtracted.length).catch(() => null);
+  // V6: Process with new memory intake (automatic categorization)
+  const trace = [];
+  trace.push(createTraceEvent('MESSAGE_RECEIVED', { userId: safeUserId, sessionId: safeSessionId, role, textPreview: String(text || '').slice(0, 120) }));
+
+  const v6Intake = await memoryIntakeService.processIncomingMemory(
+    safeUserId,
+    safeSessionId,
+    text,
+    { sessionId: safeSessionId }
+  ).catch((err) => {
+    trace.push(createTraceEvent('V6_INTAKE_FAILED', { error: err?.message || String(err) }));
+    return { success: false };
+  });
+
+  const extracted = memoryExtractor.extractAll(text || '');
+  trace.push(createTraceEvent('MEMORY_EXTRACTED', { count: extracted.length, extracted }));
+
+  const { accepted: acceptedMemories, rejected: rejectedMemories } = memoryFilterService.auditExtractedMemories(extracted, text);
+  trace.push(createTraceEvent('MEMORY_FILTERED', {
+    acceptedCount: acceptedMemories.length,
+    rejectedCount: rejectedMemories.length,
+    rejectedMemories,
+  }));
+
+  if (extracted.length > acceptedMemories.length) {
+    await memoryMetricsService.incrementFilteredMemoryCount(safeUserId, extracted.length - acceptedMemories.length);
   }
 
-  const scored = filteredExtracted.map((memory) => {
+  const scored = acceptedMemories.map((memory) => {
     const importanceScore = memoryImportanceService.calculateImportance({
       category: memory.category,
       memory: memory.memory,
@@ -99,40 +135,43 @@ async function processUserMessage({ userId, sessionId, text, role = 'user' }) {
 
   const results = [];
   for (const memoryItem of scored) {
+    trace.push(createTraceEvent('MEMORY_SAVE_ATTEMPT', { category: memoryItem.category, memoryPreview: String(memoryItem.memory || '').slice(0, 100), importanceScore: memoryItem.importanceScore }));
+    // Fail fast on any save error
+    const saved = await memoryStorageService.saveMemory({
+      userId: safeUserId,
+      category: memoryItem.category,
+      memory: memoryItem.memory,
+      tags: memoryItem.tags || [],
+      importanceScore: memoryItem.importanceScore,
+      source: 'direct',
+    });
+
+    if (!saved) throw new Error('Save returned empty result');
+    if (saved && saved.success === false) throw new Error(`Save rejected: ${saved.reason || 'unknown'}`);
+
+    // enqueue promotion/tracking job for this fingerprint (best-effort)
     try {
-      const saved = await memoryStorageService.saveMemory({
-        userId,
-        category: memoryItem.category,
-        memory: memoryItem.memory,
-        tags: memoryItem.tags || [],
-        importanceScore: memoryItem.importanceScore,
-        source: 'direct',
+      await promotionQueueService.enqueuePromotion({
+        userId: safeUserId,
+        sessionId: safeSessionId,
+        memoryFingerprint: saved.fingerprint,
+        memoryCategory: saved.category,
+        memoryId: String(saved._id || saved.id || ''),
       });
-      // enqueue promotion/tracking job for this fingerprint
-      try {
-        await promotionQueueService.enqueuePromotion({
-          userId,
-          sessionId,
-          memoryFingerprint: saved.fingerprint,
-          memoryCategory: saved.category,
-          memoryId: String(saved._id || saved.id || ''),
-        });
-      } catch (e) {
-        console.warn('Failed to enqueue promotion job:', e && e.message ? e.message : e);
-      }
-      await persistPineconeVectors(saved, memoryItem.memory);
-      results.push({ memory: memoryItem, saved: { id: String(saved._id), category: saved.category } });
-    } catch (error) {
-      results.push({ memory: memoryItem, error: error.message });
+    } catch (e) {
+      console.warn('Failed to enqueue promotion job:', e && e.message ? e.message : e);
     }
+
+    await persistPineconeVectors(saved, memoryItem.memory);
+    results.push({ memory: memoryItem, saved: { id: String(saved._id), category: saved.category } });
   }
 
-  const existingState = await conversationStateService.getConversationState(userId);
+  const existingState = await conversationStateService.getConversationState(safeUserId);
   const nextState = buildStateUpdate({ existingState, text, role });
-  nextState.lastSessionId = sessionId || existingState?.lastSessionId || '';
+  nextState.lastSessionId = safeSessionId || existingState?.lastSessionId || '';
 
-  const finalState = await conversationStateService.updateConversationState(userId, nextState);
-  await sessionMemoryService.saveActiveSessionMemory(userId, {
+  const finalState = await conversationStateService.updateConversationState(safeUserId, nextState);
+  await sessionMemoryService.saveActiveSessionMemory(safeUserId, {
     currentTopic: finalState.currentTopic,
     currentTask: finalState.currentTask,
     emotion: finalState.emotion,
@@ -147,17 +186,17 @@ async function processUserMessage({ userId, sessionId, text, role = 'user' }) {
   });
 
   if (env.enableProfileCache) {
-    memoryProfileService.rebuildMemoryProfile(userId).catch((err) => {
+    memoryProfileService.rebuildMemoryProfile(safeUserId).catch((err) => {
       console.warn('Memory profile rebuild failed:', err);
     });
   }
 
-  sessionBootstrapService.buildSessionBootstrapContext(userId).catch((err) => {
+  sessionBootstrapService.buildSessionBootstrapContext(safeUserId).catch((err) => {
     console.warn('Bootstrap cache refresh failed:', err);
   });
 
   if (env.enableUnfinishedContext) {
-    unfinishedContextService.syncUnfinishedContexts(userId, text, extracted).catch((err) => {
+    unfinishedContextService.syncUnfinishedContexts(safeUserId, text, extracted).catch((err) => {
       console.warn('Unfinished context sync failed:', err);
     });
   }
@@ -171,16 +210,18 @@ async function processUserMessage({ userId, sessionId, text, role = 'user' }) {
 }
 
 async function enqueueOrProcessMessage({ userId, sessionId, text, role = 'user' }) {
+  const { userId: safeUserId, sessionId: safeSessionId } = memoryIsolationValidator.validateMemoryOperation({ userId, sessionId });
+
   if (!text || typeof text !== 'string' || !text.trim()) {
     throw new Error('Text message is required for memory processing');
   }
 
-  const existingState = await conversationStateService.getConversationState(userId);
+  const existingState = await conversationStateService.getConversationState(safeUserId);
   const nextState = buildStateUpdate({ existingState, text, role });
-  nextState.lastSessionId = sessionId || existingState?.lastSessionId || '';
+  nextState.lastSessionId = safeSessionId || existingState?.lastSessionId || '';
 
-  const finalState = await conversationStateService.updateConversationState(userId, nextState);
-  await sessionMemoryService.saveActiveSessionMemory(userId, {
+  const finalState = await conversationStateService.updateConversationState(safeUserId, nextState);
+  await sessionMemoryService.saveActiveSessionMemory(safeUserId, {
     currentTopic: finalState.currentTopic,
     currentTask: finalState.currentTask,
     emotion: finalState.emotion,
@@ -194,19 +235,28 @@ async function enqueueOrProcessMessage({ userId, sessionId, text, role = 'user' 
     updatedAt: finalState.updatedAt,
   });
 
-  if (!env.enableQueue) {
-    return processUserMessage({ userId, sessionId, text, role });
+  if (!env.enableQueue || env.certificationMode) {
+    if (env.certificationMode) {
+      console.warn('[CERTIFICATION_MODE] Bypassing memory queue and processing directly');
+    }
+    const result = await processUserMessage({ userId: safeUserId, sessionId: safeSessionId, text, role });
+    return {
+      ...result,
+      queued: false,
+      queueBypassed: true,
+    };
   }
 
-  const job = await memoryJobService.enqueueMemoryJob({ userId, message: text, priority: 'normal' });
+  const job = await memoryJobService.enqueueMemoryJob({ userId: safeUserId, message: text, priority: 'normal' });
   return { queued: true, jobId: String(job._id), conversationState: finalState };
 }
 
 async function getMemoryDiagnostics(userId) {
-  const redisClient = await sessionMemoryService.getActiveSessionMemory(userId).catch(() => null);
-  const profile = await memoryProfileService.getMemoryProfile(userId).catch(() => null);
-  const conversationState = await conversationStateService.getConversationState(userId).catch(() => null);
-  const bootstrap = await require('./bootstrapCacheService').getBootstrapContext(userId).catch(() => null);
+  const { userId: safeUserId } = memoryIsolationValidator.validateMemoryOperation({ userId });
+  const redisClient = await sessionMemoryService.getActiveSessionMemory(safeUserId).catch(() => null);
+  const profile = await memoryProfileService.getMemoryProfile(safeUserId).catch(() => null);
+  const conversationState = await conversationStateService.getConversationState(safeUserId).catch(() => null);
+  const bootstrap = await require('./bootstrapCacheService').getBootstrapContext(safeUserId).catch(() => null);
   const queueStatus = await memoryJobService.countQueueStatus().catch(() => null);
   const diagnostics = {
     mongoConnected: require('mongoose').connection.readyState === 1,

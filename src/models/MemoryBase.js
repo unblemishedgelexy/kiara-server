@@ -17,6 +17,7 @@ function createMemorySchema() {
       lastAccessed: { type: Date, default: Date.now },
       emotionalWeight: { type: Number, min: 0, max: 1, default: 0 },
       source: { type: String, default: 'pipeline' },
+      fingerprint: { type: String, index: true },
       confidence: { type: Number, min: 0, max: 1, default: 0.5, index: true },
     },
     { timestamps: true }

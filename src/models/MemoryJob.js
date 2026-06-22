@@ -13,6 +13,9 @@ const memoryJobSchema = new mongoose.Schema(
     priority: { type: String, enum: ['low', 'normal', 'high'], default: 'normal', index: true },
     attempts: { type: Number, default: 0 },
     error: { type: String, default: '' },
+    processingStartedAt: { type: Date, default: null, index: true },
+    lastStep: { type: String, default: '' },
+    stackTrace: { type: String, default: '' },
   },
   { timestamps: true }
 );

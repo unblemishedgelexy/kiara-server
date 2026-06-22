@@ -7,11 +7,11 @@ function normalizeName(name) {
 function extractPersonNames(memoryText) {
   const text = String(memoryText || '').trim();
 
-  const explicitName = text.match(/\b(?:User name is|My name is|I am|I'm)\s+([A-Z][a-z]+(?: [A-Z][a-z]+)*)/i);
-  if (explicitName) return [explicitName[1].trim()];
+  const relationshipPattern = text.match(/\bRelationship:\s*(?:my\s+)?(?:best\s+)?(?:friend|wife|husband|partner|colleague|coworker|boss|manager|mentor|mentee|family(?: member)?|sibling|uncle|aunt|father|mother)\s*(?:is|named|called|who\s+is|who's|was|,)\s*([A-Z][a-z]+(?: [A-Z][a-z]+)*)/i);
+  if (relationshipPattern) return [relationshipPattern[1].trim()];
 
-  const relationshipName = text.match(/\b(?:Relationship:\s*)?([A-Z][a-z]+(?: [A-Z][a-z]+)*)\b/i);
-  if (relationshipName) return [relationshipName[1].trim()];
+  const identityName = text.match(/\b(?:User name is|My name is|I am|I'm)\s+([A-Z][a-z]+(?: [A-Z][a-z]+)*)/i);
+  if (identityName) return [identityName[1].trim()];
 
   const projectNames = text.match(/\b(?:with|and|partner|teammate)\s+([A-Z][a-z]+(?: [A-Z][a-z]+)*)\b/i);
   if (projectNames) return [projectNames[1].trim()];
@@ -19,7 +19,12 @@ function extractPersonNames(memoryText) {
   const fallback = text.match(/([A-Z][a-z]+(?: [A-Z][a-z]+)*)/g);
   if (!fallback) return [];
 
-  return Array.from(new Set(fallback.slice(0, 3).map((name) => name.trim())));
+  const stopWords = new Set(['My', 'I', 'The', 'Best', 'Friend', 'Relationship', 'Is', 'Aman', 'With', 'And', 'Partner', 'Teammate']);
+  return Array.from(new Set(
+    fallback
+      .map((name) => name.trim())
+      .filter((name) => name.length > 1 && !stopWords.has(name))
+  ));
 }
 
 function deriveRelationshipType(category, memoryText) {

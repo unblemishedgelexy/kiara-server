@@ -3,6 +3,7 @@ const { env } = require('../config/env');
 
 let pineconeClient = null;
 let pineconeIndex = null;
+let pineconeUnavailable = false;
 
 function isPineconeConfigured() {
   return Boolean(env.pineconeApiKey && env.pineconeIndexName);
@@ -14,6 +15,7 @@ async function initPinecone() {
   }
 
   if (!isPineconeConfigured()) {
+    pineconeUnavailable = true;
     throw new Error('Pinecone is not configured. Set PINECONE_API_KEY and PINECONE_INDEX_NAME.');
   }
 
@@ -57,42 +59,77 @@ async function ensureIndex() {
 }
 
 async function getIndex() {
+  if (pineconeUnavailable) return null;
   if (!pineconeIndex) {
-    const { index } = await initPinecone();
-    pineconeIndex = index;
+    try {
+      const { index } = await initPinecone();
+      pineconeIndex = index;
+    } catch (err) {
+      pineconeUnavailable = true;
+      console.warn('[PINECONE_SKIPPED] initialization failed:', err && err.message ? err.message : err);
+      return null;
+    }
   }
   return pineconeIndex;
 }
 
 async function upsertLongTermVector({ id, vector, metadata }) {
-  const index = await getIndex();
+  try {
+    const index = await getIndex();
+    if (!index) {
+      console.warn('[PINECONE_SKIPPED] upsert skipped: index unavailable');
+      return;
+    }
 
-  await index.upsert([
-    {
-      id,
-      values: vector,
-      metadata,
-    },
-  ]);
+    await index.upsert([
+      {
+        id,
+        values: vector,
+        metadata,
+      },
+    ]);
+  } catch (err) {
+    pineconeUnavailable = true;
+    console.warn('[PINECONE_SKIPPED] upsert failed:', err && err.message ? err.message : err);
+  }
 }
 
 async function deleteLongTermVector(id) {
-  const index = await getIndex();
-  await index.deleteOne(id);
+  try {
+    const index = await getIndex();
+    if (!index) {
+      console.warn('[PINECONE_SKIPPED] delete skipped: index unavailable');
+      return;
+    }
+    await index.deleteOne(id);
+  } catch (err) {
+    pineconeUnavailable = true;
+    console.warn('[PINECONE_SKIPPED] delete failed:', err && err.message ? err.message : err);
+  }
 }
 
 async function queryLongTermVectors({ vector, topK = 10, filter = {} }) {
-  const index = await getIndex();
-  
-  const results = await index.query({
-    vector,
-    topK,
-    includeMetadata: true,
-    includeValues: false,
-    filter,
-  });
+  try {
+    const index = await getIndex();
+    if (!index) {
+      console.warn('[PINECONE_SKIPPED] query skipped: index unavailable');
+      return [];
+    }
 
-  return results.matches || [];
+    const results = await index.query({
+      vector,
+      topK,
+      includeMetadata: true,
+      includeValues: false,
+      filter,
+    });
+
+    return results.matches || [];
+  } catch (err) {
+    pineconeUnavailable = true;
+    console.warn('[PINECONE_SKIPPED] query failed:', err && err.message ? err.message : err);
+    return [];
+  }
 }
 
 module.exports = {
@@ -103,4 +140,6 @@ module.exports = {
   deleteLongTermVector,
   queryLongTermVectors,
   isPineconeConfigured,
+  // exposed for diagnostics
+  _pineconeUnavailable: () => pineconeUnavailable,
 };

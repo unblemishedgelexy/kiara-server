@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "test:memory": "node scripts/test_memory.js",
+    "certify:gemini-session": "node scripts/run-gemini-session-certification.js"
   },
   "keywords": [],
   "author": "",
@@ -34,12 +36,10 @@
     "nodemon": "^3.1.14",
     "redis": "^4.6.13",
     "socket.io": "^4.8.3",
+    "string-similarity": "^4.0.4",
     "twilio": "^4.13.0",
     "xss-clean": "^0.1.1"
   },
-  "devDependencies": {
-  }
-,
   "overrides": {
     "tar": ">=7.5.11",
     "js-yaml": "^4.1.2",

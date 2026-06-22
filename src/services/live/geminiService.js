@@ -9,6 +9,7 @@ const {
   createPublicLiveSessionConfig,
   createLiveSessionConfig,
 } = require('./liveConfig');
+const systemPromptBuilder = require('../memory/systemPromptBuilderService');
 
 function hasGeminiServerAccess() {
   return Boolean(env.geminiApiKey);
@@ -57,9 +58,22 @@ async function createLiveEphemeralToken(requestingUserId = null) {
     const newSessionExpireTime = new Date(
       Date.now() + newSessionWindowSeconds * 1000
     ).toISOString();
+    // Build dynamic system instruction including user memories (if available)
+    let dynamicSystemInstruction = GEMINI_LIVE_SYSTEM_INSTRUCTION;
+    if (requestingUserId) {
+      try {
+        const built = await systemPromptBuilder.buildSystemPrompt(requestingUserId, { tokenBudget: 1800 });
+        if (built && built.systemPrompt) {
+          dynamicSystemInstruction = `${GEMINI_LIVE_SYSTEM_INSTRUCTION}\n\n${built.systemPrompt}`;
+        }
+      } catch (e) {
+        console.warn('Failed to build dynamic system prompt for Gemini:', e && e.message ? e.message : e);
+      }
+    }
+
     const sessionConfig = createLiveSessionConfig({
       model: env.geminiLiveModel,
-      systemInstruction: GEMINI_LIVE_SYSTEM_INSTRUCTION,
+      systemInstruction: dynamicSystemInstruction,
       voiceName: env.geminiLiveVoice,
     });
     const liveConnectConfig = createLiveConnectConfig(sessionConfig);
