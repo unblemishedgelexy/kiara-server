@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const { OAuth2Client } = require('google-auth-library');
 const OAuthStateModel = require('../../models/OAuthState');
 const AuthTicketModel = require('../../models/AuthTicket');
@@ -42,6 +43,10 @@ async function createAuthRequest(returnUrl) {
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = createCodeChallenge(codeVerifier);
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+  if (mongoose.connection.readyState !== 1) {
+    throw new Error('MongoDB is not connected yet. Google OAuth is unavailable until the database connection completes.');
+  }
 
   await OAuthStateModel.create({ state, codeVerifier, returnUrl, expiresAt });
 

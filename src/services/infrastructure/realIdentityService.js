@@ -3,8 +3,8 @@
  * Actually matches faces and voices against stored profiles
  */
 
-const PersonProfile = require('../../models/PersonProfile');
 const { cosineSimilarity } = require('../../utils/vectorMath');
+const PersonProfile = require('../../models/PersonProfile');
 
 const FACE_THRESHOLD = 0.55; // 55% similarity threshold for face
 const VOICE_THRESHOLD = 0.50; // 50% similarity threshold for voice
@@ -436,7 +436,7 @@ async function learnPerson(userId, personId, name, relationship, faceDescriptor,
         }
 
         const update = { $setOnInsert: setOnInsert };
-        const options = { upsert: true, new: true };
+        const options = { upsert: true, returnDocument: 'after' };
 
         try {
           const doc = await PersonProfile.findOneAndUpdate(filter, update, options);
@@ -450,7 +450,15 @@ async function learnPerson(userId, personId, name, relationship, faceDescriptor,
       };
 
       // Candidate filters: both descriptors, face-only, voice-only
-      const baseInsert = { userId, name: name || null, relationship: relationship || 'guest', isLearned: true, learningLevel: 30 };
+      const safeName = typeof name === 'string' ? name.trim() : null;
+      const baseInsert = {
+        userId,
+        name: safeName || 'unknown',
+        nameLower: (safeName || 'unknown').toLowerCase().trim(),
+        relationship: relationship || 'guest',
+        isLearned: true,
+        learningLevel: 30,
+      };
 
       // Use a deterministic descriptorKey to ensure identical filters across callers
       const descriptorKey = makeDescriptorKey(faceDescriptor, voiceDescriptor);
@@ -467,10 +475,12 @@ async function learnPerson(userId, personId, name, relationship, faceDescriptor,
 
       // If still not found, create a new profile (should be rare)
       if (!profile) {
+        const safeName = typeof name === 'string' ? name.trim() : null;
         profile = new PersonProfile({
           userId,
-          name,
-          relationship,
+          name: safeName || 'unknown',
+          nameLower: (safeName || 'unknown').toLowerCase().trim(),
+          relationship: relationship || 'guest',
           faceDescriptor: faceDescriptor || null,
           voiceDescriptor: voiceDescriptor || null,
           voiceCharacteristics: voiceCharacteristics || null,
@@ -481,8 +491,9 @@ async function learnPerson(userId, personId, name, relationship, faceDescriptor,
       }
     }
 
-    if (name) {
-      profile.name = name;
+    if (typeof name === 'string' && name.trim()) {
+      profile.name = name.trim();
+      profile.nameLower = name.trim().toLowerCase();
     }
 
     profile.relationship = relationship || profile.relationship || 'guest';

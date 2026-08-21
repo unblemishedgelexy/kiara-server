@@ -259,7 +259,30 @@ async function refreshToken(req, res, next) {
         refreshToken: result.refreshToken,
       },
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    const message = err && err.message ? err.message : 'Token refresh failed.';
+    const statusCode =
+      (err && err.name === 'TokenExpiredError') ||
+      (err && err.name === 'JsonWebTokenError') ||
+      /refresh token invalid|expired/i.test(message)
+        ? 401
+        : 400;
+
+    console.error('[AUTH_REFRESH_FAILED]', JSON.stringify({
+      requestId: req?.requestId || null,
+      message,
+      statusCode,
+      userAgent: req.headers['user-agent'],
+      clientIp: req.ip || req.connection?.remoteAddress || null,
+    }));
+
+    return res.status(statusCode).json({
+      success: false,
+      message,
+      code: 'REFRESH_FAILED',
+      requestId: req?.requestId,
+    });
+  }
 }
 
 // ============= LOGOUT =============

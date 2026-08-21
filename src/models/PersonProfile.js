@@ -1,143 +1,54 @@
 const mongoose = require('mongoose');
 
-const embeddingSchema = new mongoose.Schema({
-  vector: [Number],
-  timestamp: {
-    type: Date,
-    default: Date.now
-  },
-  quality: {
-    type: Number,
-    min: 0,
-    max: 1
-  }
-});
-
-const personProfileSchema = new mongoose.Schema(
+const PersonProfileSchema = new mongoose.Schema(
   {
-    userId: {
-      type: String,
-      required: true,
-      index: true
-    },
-
-    name: {
-      type: String,
-      required: true
-    },
-
-    nameLower: {
-      type: String,
-      required: true,
-      lowercase: true,
-      index: true,
-    },
-
-    relationship: {
-      type: String,
-      enum: ['family', 'friend', 'colleague', 'guest', 'unknown', 'team', 'partner', 'mentor', 'other'],
-      default: 'guest'
-    },
-    mentionCount: {
-      type: Number,
-      default: 0,
-      index: true,
-    },
-    importanceScore: {
-      type: Number,
-      min: 0,
-      max: 1,
-      default: 0.5,
-    },
-    relatedPeople: {
-      type: [String],
-      default: [],
-    },
-    accessCount: {
-      type: Number,
-      default: 0,
-    },
-    facts: {
-      type: [String],
-      default: [],
-    },
-    lastMentioned: Date,
-
-    faceEmbeddings: [embeddingSchema],
-    voiceEmbeddings: [embeddingSchema],
-
-    faceDescriptor: {
-      type: [Number],
-      index: true
-    },
-
-    voiceDescriptor: {
-      type: [Number],
-      index: true
-    },
-
-    descriptorKey: {
-      type: String,
-      index: true
-    },
-
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    name: { type: String, trim: true, default: 'unknown' },
+    nameLower: { type: String, trim: true, lowercase: true },
+    relationship: { type: String, trim: true, default: 'guest' },
+    descriptorKey: { type: String, trim: true, index: true },
+    isLearned: { type: Boolean, default: false },
+    learningLevel: { type: Number, default: 0 },
+    faceDescriptor: { type: [Number], default: null },
+    voiceDescriptor: { type: [Number], default: null },
     voiceCharacteristics: {
-      type: mongoose.Schema.Types.Mixed,
-      default: null
+      pitch: { type: Number, default: null },
+      energy: { type: Number, default: null },
+      zcr: { type: Number, default: null },
     },
-
-    isLearned: {
-      type: Boolean,
-      default: false,
-      index: true
-    },
-
+    faceEmbeddings: [
+      {
+        vector: { type: [Number], required: true },
+        timestamp: { type: Date, default: Date.now },
+        quality: { type: Number, default: 0 },
+      },
+    ],
+    voiceEmbeddings: [
+      {
+        vector: { type: [Number], required: true },
+        timestamp: { type: Date, default: Date.now },
+        quality: { type: Number, default: 0 },
+      },
+    ],
     recognitionHistory: [
       {
         timestamp: { type: Date, default: Date.now },
         faceScore: { type: Number, default: 0 },
         voiceScore: { type: Number, default: 0 },
         overallConfidence: { type: Number, default: 0 },
-        source: { type: String, default: 'unknown' }
-      }
+        source: { type: String, trim: true },
+      },
     ],
-
-    lastFaceCapture: Date,
-    lastVoiceCapture: Date,
-
-    faceConfidence: {
-      type: Number,
-      min: 0,
-      max: 1,
-      default: 0
-    },
-
-    voiceConfidence: {
-      type: Number,
-      min: 0,
-      max: 1,
-      default: 0
-    },
-
-    meetingsCount: {
-      type: Number,
-      default: 0
-    },
-
-    lastMeeting: Date,
-
-    learningLevel: {
-      type: Number,
-      min: 0,
-      max: 100,
-      default: 0
-    }
+    faceConfidence: { type: Number, default: 0 },
+    voiceConfidence: { type: Number, default: 0 },
+    lastFaceCapture: { type: Date },
+    lastVoiceCapture: { type: Date },
+    meetingsCount: { type: Number, default: 0 },
+    lastMeeting: { type: Date },
   },
-  {
-    timestamps: true
-  }
+  { timestamps: true }
 );
 
-personProfileSchema.index({ userId: 1, name: 1 });
+PersonProfileSchema.index({ userId: 1, descriptorKey: 1 });
 
-module.exports = mongoose.model('PersonProfile', personProfileSchema);
+module.exports = mongoose.models.PersonProfile || mongoose.model('PersonProfile', PersonProfileSchema);

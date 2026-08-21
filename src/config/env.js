@@ -5,19 +5,27 @@ const configRoot = path.resolve(__dirname, '../../');
 dotenv.config({ path: path.resolve(configRoot, '.env.local') });
 dotenv.config({ path: path.resolve(configRoot, '.env') });
 
+function stripQuotes(value) {
+  if (typeof value !== 'string') return value;
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
 function readEnv(name, fallback = '') {
-  return (process.env[name] || fallback).trim();
+  return stripQuotes((process.env[name] || fallback).trim());
 }
 
 function readNumber(name, fallback) {
-  const value = Number(process.env[name]);
+  const value = Number(stripQuotes(process.env[name]));
   return Number.isFinite(value) ? value : fallback;
 }
 
 function readList(name, fallback) {
-  const rawValue = (process.env[name] || '').trim();
+  const rawValue = stripQuotes((process.env[name] || '').trim());
   if (!rawValue) return fallback;
-  return rawValue.split(',').map((v) => v.trim().replace(/\/$/, '')).filter(Boolean);
+  return rawValue.split(',').map((v) => stripQuotes(v.trim().replace(/\/$/, ''))).filter(Boolean);
 }
 
 function mergeLists(...lists) {
@@ -49,6 +57,7 @@ const env = {
   geminiApiKey: readEnv('GEMINI_API_KEY'),
   geminiLiveModel: readEnv('GEMINI_LIVE_MODEL', ''),
   geminiLiveVoice: readEnv('GEMINI_LIVE_VOICE', ''),
+  geminiEmbeddingModel: readEnv('GEMINI_EMBEDDING_MODEL', ''),
   jwtSecret: readEnv('JWT_SECRET', 'dev-only-change-me'),
   jwtAccessSecret: readEnv('JWT_ACCESS_SECRET', ''),
   jwtRefreshSecret: readEnv('JWT_REFRESH_SECRET', ''),
@@ -81,6 +90,7 @@ const env = {
   redisDb: readNumber('REDIS_DB', 0),
   redisUrl: readEnv('REDIS_URL', ''),
   redisPassword: readEnv('REDIS_PASSWORD', ''),
+  liveMemoryEnabled: readEnv('LIVE_MEMORY_ENABLED', 'true').toLowerCase() === 'true',
   enablePinecone: readEnv('ENABLE_PINECONE', 'true').toLowerCase() === 'true',
   enableQueue: readEnv('ENABLE_QUEUE', 'true').toLowerCase() === 'true',
   certificationMode: readEnv('CERTIFICATION_MODE', 'false').toLowerCase() === 'true',
@@ -92,10 +102,15 @@ const env = {
   enableMemoryLab: readEnv('ENABLE_MEMORY_LAB', nodeEnv === 'production' ? 'false' : 'true').toLowerCase() === 'true',
   bootstrapVersion: readNumber('BOOTSTRAP_VERSION', 1),
   // Memory TTL Configuration
-  shortTermMemoryTTL: readNumber('SHORT_TERM_MEMORY_TTL', 3600), // 1 hour
+  shortTermMemoryTTL: readNumber('SHORT_TERM_MEMORY_TTL', 1500), // 25 minutes
+  // Short-term memory retrieval character budget (controls how many characters are returned)
+  shortTermMemoryCharBudget: readNumber('SHORT_TERM_MEMORY_CHAR_BUDGET', 4000),
   pineconeApiKey: readEnv('PINECONE_API_KEY', ''),
   pineconeIndexName: readEnv('PINECONE_INDEX_NAME', 'kiara-long-term-memory'),
   pineconeVectorDimension: readNumber('PINECONE_VECTOR_DIMENSION', 1536),
+  pineconeEnvironment: readEnv('PINECONE_ENVIRONMENT', ''),
+  pineconeCloud: readEnv('PINECONE_CLOUD', ''),
+  pineconeRegion: readEnv('PINECONE_REGION', ''),
   // ImageKit configuration
   imagekitPublicKey: readEnv('IMAGEKIT_PUBLIC_KEY', ''),
   imagekitPrivateKey: readEnv('IMAGEKIT_PRIVATE_KEY', ''),

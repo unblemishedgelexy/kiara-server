@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test:memory": "node scripts/test_memory.js",
-    "certify:gemini-session": "node scripts/run-gemini-session-certification.js"
+    "certify:gemini-session": "node scripts/run-gemini-session-certification.js",
+    "certify:gemini-reality": "node scripts/run-gemini-reality-certification.js"
   },
   "keywords": [],
   "author": "",
@@ -15,11 +16,13 @@
   "dependencies": {
     "@google/genai": "^2.7.0",
     "@imagekit/nodejs": "^7.7.0",
-    "@pinecone-database/pinecone": "^1.0.0",
+    "@pinecone-database/pinecone": "8.2.0",
     "bcrypt": "^5.1.0",
     "bcryptjs": "^3.0.3",
+    "body-parser": "^2.3.0",
     "cookie-parser": "^1.4.7",
     "cookie-session": "^2.0.0",
+    "cors": "^2.8.6",
     "crypto": "^1.0.1",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
@@ -35,9 +38,9 @@
     "nodemailer": "^8.0.9",
     "nodemon": "^3.1.14",
     "redis": "^4.6.13",
-    "socket.io": "^4.8.3",
     "string-similarity": "^4.0.4",
     "twilio": "^4.13.0",
+    "uuid": "^14.0.1",
     "xss-clean": "^0.1.1"
   },
   "overrides": {

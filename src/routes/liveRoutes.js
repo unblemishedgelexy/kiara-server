@@ -27,25 +27,32 @@ router.post('/health/check', async (_req, res) => {
 });
 
 router.post('/token', authMiddleware.optional, async (req, res) => {
-  const requestMeta = {
-    path: req.originalUrl,
-    method: req.method,
-    userId: req.userId || null,
-    timestamp: new Date().toISOString(),
-  };
-  
   if (!env.geminiApiKey) {
-    console.warn('[LiveRoute] missing Gemini API key', requestMeta);
     res.status(503).json({ error: 'Gemini API key is not configured.' });
     return;
   }
 
+  const requestStartedAt = Date.now();
+  const userId = req.userId || null;
+  const requestBody = req.body || {};
+  const userQuery = typeof requestBody.userQuery === 'string' ? requestBody.userQuery : '';
+  const sessionId = typeof requestBody.sessionId === 'string' ? requestBody.sessionId : userId || 'anonymous';
+  const activeContext = requestBody.activeContext && typeof requestBody.activeContext === 'object' ? requestBody.activeContext : {};
+
+  console.info('[LIVE_TOKEN_ROUTE]', {
+    userId: userId || 'anonymous',
+    sessionId,
+    question: String(userQuery || '').slice(0, 180),
+    method: req.method,
+    path: req.path,
+    timestamp: new Date().toISOString(),
+  });
+
   try {
-    const userId = req.userId || null;
-    const token = await createLiveEphemeralToken(userId);
+    const token = await createLiveEphemeralToken(userId, { userQuery, sessionId, activeContext });
 
     if (!token || typeof token.token !== 'string' || !token.token.trim()) {
-      console.error('[LiveRoute] invalid live token payload', { requestMeta, token });
+      console.error('[ERROR]', 'Live token generation returned invalid token data.');
       res.status(502).json({ error: 'Live token generation returned invalid token data.' });
       return;
     }
@@ -57,7 +64,13 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
       sessionConfig: token.sessionConfig,
     };
 
-   
+    console.info('[LIVE_TOKEN_ROUTE_RESPONSE]', {
+      userId: userId || 'anonymous',
+      durationMs: Date.now() - requestStartedAt,
+      sessionConfigModel: token.sessionConfig?.model || 'unknown',
+      responseModalities: token.sessionConfig?.responseModalities || 'unknown',
+      timestamp: new Date().toISOString(),
+    });
     res.status(200).json(payload);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -73,11 +86,7 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
       responseBody.reason = 'token_generation_failed';
     }
 
-    console.error('[LiveRoute] failed to create live token', {
-      ...requestMeta,
-      error: errorMessage,
-      statusCode,
-    });
+    console.error('[ERROR]', 'Failed to create live token:', errorMessage);
     res.status(statusCode).json(responseBody);
   }
 });

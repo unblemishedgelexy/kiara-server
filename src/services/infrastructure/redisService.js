@@ -1,20 +1,51 @@
 const redis = require('redis');
 const { env } = require('../../config/env');
 
+const REDIS_LOGGING_ENABLED = (process.env.REDIS_LOGGING || '').toLowerCase() === 'true';
+
+function logRedis(level, ...args) {
+  if (!REDIS_LOGGING_ENABLED) return;
+  if (level === 'error') console.error(...args);
+  else if (level === 'warn') console.warn(...args);
+  else console.log(...args);
+}
+
 let redisClient = null;
 
 async function initRedis() {
-  if (redisClient) return redisClient;
+  if (redisClient) {
+    return redisClient;
+  }
 
   async function connectClient(options, description) {
-    const client = redis.createClient(options);
+    const client = redis.createClient({
+      ...options,
+      socket: {
+        ...(options.socket || {}),
+        reconnectStrategy: (retries) => {
+          if (retries >= 10) {
+            return new Error('Redis reconnection attempts exhausted');
+          }
+          return Math.min(200 + retries * 200, 2000);
+        },
+      },
+    });
+
     client.on('error', (err) => {
-      console.error('Redis Client Error:', err);
+      logRedis('error', '[REDIS_ERROR]', err instanceof Error ? err.message : err);
+    });
+    client.on('ready', () => {
+      logRedis('info', '[REDIS_READY]');
+    });
+    client.on('reconnecting', () => {
+      logRedis('warn', '[REDIS_RECONNECTING]');
+    });
+    client.on('end', () => {
+      logRedis('warn', '[REDIS_DISCONNECTED]');
     });
 
     await client.connect();
-    const pingResult = await client.ping();
-    console.log(`Redis connected successfully (${pingResult}) using ${description}`);
+    await client.ping();
     return client;
   }
 
@@ -37,18 +68,15 @@ async function initRedis() {
   try {
     if (env.redisUrl) {
       try {
-        console.log('Redis using REDIS_URL for connection');
         redisClient = await connectClient({ url: env.redisUrl }, 'REDIS_URL');
         return redisClient;
       } catch (urlError) {
-        console.error('Failed to initialize Redis with REDIS_URL:', urlError);
         if (env.redisHost) {
           try {
-            console.log('Falling back to Redis host/port connection');
             redisClient = await connectClient(buildSocketOptions(), 'host/port');
             return redisClient;
           } catch (socketError) {
-            console.error('Failed to initialize Redis with host/port fallback:', socketError);
+            console.error('[ERROR]', 'Failed to initialize Redis fallback:', socketError instanceof Error ? socketError.message : socketError);
             throw socketError;
           }
         }
@@ -56,36 +84,13 @@ async function initRedis() {
       }
     }
 
-    console.log('Redis using host/port for connection');
     const options = buildSocketOptions();
     redisClient = await connectClient(options, 'host/port');
     return redisClient;
   } catch (error) {
-    console.error('Failed to initialize Redis:', error);
+    console.error('[ERROR]', 'Failed to initialize Redis:', error instanceof Error ? error.message : error);
     throw error;
   }
-}
-
-function ensureUserId(userId) {
-  if (!userId || typeof userId !== 'string' || !userId.trim()) {
-    throw new Error('Redis short-term memory operations require a valid userId');
-  }
-  return userId.trim();
-}
-
-function ensureSessionId(sessionId) {
-  if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim()) {
-    throw new Error('Redis short-term memory operations require a valid sessionId');
-  }
-  return sessionId.trim();
-}
-
-function buildShortTermKey(userId, sessionId) {
-  return `memory:short:${ensureUserId(userId)}:${ensureSessionId(sessionId)}`;
-}
-
-function buildShortTermPattern(userId) {
-  return `memory:short:${ensureUserId(userId)}:*`;
 }
 
 async function getRedisClient() {
@@ -93,67 +98,6 @@ async function getRedisClient() {
     await initRedis();
   }
   return redisClient;
-}
-
-// Save short-term memory to Redis
-async function saveShortTermMemory(userId, sessionId, role, message) {
-  try {
-    const client = await getRedisClient();
-    const key = buildShortTermKey(userId, sessionId);
-    const item = JSON.stringify({
-      userId: ensureUserId(userId),
-      sessionId: ensureSessionId(sessionId),
-      role,
-      message,
-      timestamp: new Date().toISOString(),
-    });
-
-    await client.rPush(key, item);
-    await client.lTrim(key, -100, -1);
-    await client.expire(key, env.shortTermMemoryTTL);
-    return { success: true, key };
-  } catch (error) {
-    console.error('Error saving to Redis:', error);
-    throw error;
-  }
-}
-
-// Get short-term memory from Redis
-async function getShortTermMemory(userId, sessionId) {
-  try {
-    const client = await getRedisClient();
-    const key = buildShortTermKey(userId, sessionId);
-    const items = await client.lRange(key, 0, -1);
-
-    if (!items || items.length === 0) {
-      return [];
-    }
-
-    return items.reduce((acc, item) => {
-      try {
-        acc.push(JSON.parse(item));
-      } catch {
-        // Skip invalid items
-      }
-      return acc;
-    }, []);
-  } catch (error) {
-    console.error('Error retrieving from Redis:', error);
-    throw error;
-  }
-}
-
-// Delete short-term memory from Redis
-async function deleteShortTermMemory(userId, sessionId) {
-  try {
-    const client = await getRedisClient();
-    const key = buildShortTermKey(userId, sessionId);
-    const result = await client.del(key);
-    return { success: true, deleted: result > 0 };
-  } catch (error) {
-    console.error('Error deleting from Redis:', error);
-    throw error;
-  }
 }
 
 // Close Redis connection
@@ -167,8 +111,5 @@ async function closeRedis() {
 module.exports = {
   initRedis,
   getRedisClient,
-  saveShortTermMemory,
-  getShortTermMemory,
-  deleteShortTermMemory,
   closeRedis,
 };

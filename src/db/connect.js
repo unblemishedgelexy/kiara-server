@@ -45,32 +45,62 @@ async function buildFallbackUriFromSrv(uri) {
   return `mongodb://${auth}${hosts}${dbSegment}${queryString ? `?${queryString}` : ''}`;
 }
 
+async function waitForMongooseConnection() {
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    const onOpen = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const cleanup = () => {
+      mongoose.connection.removeListener('open', onOpen);
+      mongoose.connection.removeListener('error', onError);
+    };
+
+    mongoose.connection.once('open', onOpen);
+    mongoose.connection.once('error', onError);
+  });
+}
+
 const connectDB = async () => {
   const uri = env.mongoUri;
   const options = {
     serverSelectionTimeoutMS: 10000,
+    bufferCommands: false,
+    autoIndex: false,
   };
+
+  mongoose.set('bufferCommands', false);
 
   try {
     await mongoose.connect(uri, options);
-    console.log('MongoDB connected');
+    await waitForMongooseConnection();
     return true;
   } catch (firstError) {
     const isSrv = uri.toLowerCase().startsWith(MONGODB_SRV_PREFIX);
     const firstMessage = firstError.message || firstError;
 
     if (!isSrv || !firstMessage.includes('querySrv')) {
-      console.error('MongoDB connection failed:', firstMessage);
+      console.error('[ERROR]', 'MongoDB connection failed:', firstMessage);
       return false;
     }
 
     try {
       const fallbackUri = await buildFallbackUriFromSrv(uri);
       await mongoose.connect(fallbackUri, options);
-      console.log('MongoDB connected');
+      await waitForMongooseConnection();
       return true;
     } catch (fallbackError) {
-      console.error('MongoDB connection failed:', fallbackError.message || fallbackError);
+      console.error('[ERROR]', 'MongoDB connection failed:', fallbackError.message || fallbackError);
       return false;
     }
   }

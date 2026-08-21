@@ -4,9 +4,6 @@ const {
   GEMINI_LIVE_VOICE,
 } = require('../../config/constants');
 
-const DEFAULT_GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
-const DEFAULT_GEMINI_LIVE_VOICE = 'Leda';
-
 const SUPPORTED_GEMINI_LIVE_MODELS = new Set([
   'gemini-3.1-flash-live-preview',
   'gemini-2.5-flash-native-audio-preview-12-2025',
@@ -59,13 +56,13 @@ function normalizeLiveModel(model) {
   const requestedModel = String(model || '').trim();
   return SUPPORTED_GEMINI_LIVE_MODELS.has(requestedModel)
     ? requestedModel
-    : DEFAULT_GEMINI_LIVE_MODEL;
+    : GEMINI_LIVE_MODEL;
 }
 
 function normalizeLiveVoice(voiceName) {
   return (
     voiceByLowercase.get(String(voiceName || '').trim().toLowerCase()) ||
-    DEFAULT_GEMINI_LIVE_VOICE
+    GEMINI_LIVE_VOICE
   );
 }
 
@@ -74,14 +71,6 @@ function createLiveSessionConfig(options = {}) {
   const requestedVoice = options.voiceName || GEMINI_LIVE_VOICE;
   const model = normalizeLiveModel(requestedModel);
   const voiceName = normalizeLiveVoice(requestedVoice);
-
-  if (requestedModel !== model) {
-    console.warn(`Unsupported Gemini Live model "${requestedModel}". Using "${model}".`);
-  }
-
-  if (requestedVoice !== voiceName) {
-    console.warn(`Unsupported Gemini Live voice "${requestedVoice}". Using "${voiceName}".`);
-  }
 
   return {
     model,

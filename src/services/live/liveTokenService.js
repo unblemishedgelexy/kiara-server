@@ -1,10 +1,10 @@
 const { createLiveEphemeralToken: createGeminiLiveToken } = require('./geminiService');
 
-async function createLiveEphemeralToken(requestingUserId = null) {
+async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   try {
-    return await createGeminiLiveToken(requestingUserId);
+    return await createGeminiLiveToken(requestingUserId, options);
   } catch (error) {
-    console.error('[LiveTokenService] createLiveEphemeralToken error', error);
+    console.error('[ERROR]', 'createLiveEphemeralToken failed:', error instanceof Error ? error.message : error);
     throw new Error(error instanceof Error ? error.message : 'Failed to create live ephemeral token');
   }
 }

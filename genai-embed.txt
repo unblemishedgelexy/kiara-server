@@ -1,0 +1,22 @@
+function embedContentResponseFromMldev(fromObject, _rootObject) {
+    const toObject = {};
+    const fromSdkHttpResponse = getValueByPath(fromObject, [
+        'sdkHttpResponse',
+    ]);
+    if (fromSdkHttpResponse != null) {
+        setValueByPath(toObject, ['sdkHttpResponse'], fromSdkHttpResponse);
+    }
+    const fromEmbeddings = getValueByPath(fromObject, ['embeddings']);
+    if (fromEmbeddings != null) {
+        let transformedList = fromEmbeddings;
+        if (Array.isArray(transformedList)) {
+            transformedList = transformedList.map((item) => {
+                return item;
+            });
+        }
+        setValueByPath(toObject, ['embeddings'], transformedList);
+    }
+    const fromMetadata = getValueByPath(fromObject, ['metadata']);
+    if (fromMetadata != null) {
+        setValueByPath(toObject, ['metadata'], fromMetadata);
+    
