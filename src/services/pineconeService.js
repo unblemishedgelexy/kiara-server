@@ -116,68 +116,31 @@ async function getIndex() {
 
 async function upsertLongTermVector({ id, vector, metadata, namespace }) {
   try {
+    if (!id || !Array.isArray(vector) || vector.length === 0) {
+      throw new Error('Pinecone upsert requires a vector id and non-empty vector');
+    }
+    const configuredDimension = Number(env.pineconeVectorDimension);
+    if (configuredDimension > 0 && vector.length !== configuredDimension) {
+      throw new Error(`Embedding dimension ${vector.length} does not match configured Pinecone dimension ${configuredDimension}`);
+    }
+    if (!metadata || typeof metadata.userId !== 'string' || !metadata.userId.trim()) {
+      throw new Error('Pinecone episode metadata requires a userId string');
+    }
+    if (namespace !== 'episodes') {
+      throw new Error('Pinecone episodic memory must use the episodes namespace');
+    }
+
     const index = await getIndex();
     if (!index) {
       console.warn('[PINECONE_SKIPPED] upsert skipped: index unavailable');
       return false;
     }
-    try {
-      // include namespace when provided
-      const payload = { records: [{ id, values: vector, metadata }] };
-      if (namespace) payload.namespace = namespace;
-      await index.upsert(payload);
+    const payload = { records: [{ id, values: vector, metadata }], namespace };
+    await index.upsert(payload);
 
-      const verification = await verifyPineconeUpsert(index, id, namespace, metadata);
-      logger.pineconeUpsert({ id, namespace, success: true, verification: verification.status, ...verification.meta });
-      return true;
-    } catch (err) {
-      // If dimension mismatch, attempt to create a temporary index matching vector dimension and retry
-      const msg = err && err.message ? err.message : String(err);
-      if (msg.includes('dimension') || msg.includes('does not match')) {
-        try {
-          const dim = Array.isArray(vector) ? vector.length : Number(env.pineconeVectorDimension) || 1536;
-          const tmpName = `${env.pineconeIndexName}-validation-${dim}`;
-          const client = pineconeClient || (await initPinecone()).client;
-          const existing = await client.listIndexes();
-          let existingNames = [];
-          if (Array.isArray(existing)) {
-            existingNames = existing.map(e => (typeof e === 'string' ? e : (e && e.name) ? e.name : '')).filter(Boolean);
-          } else if (Array.isArray(existing?.indexes)) {
-            existingNames = existing.indexes.map(e => (typeof e === 'string' ? e : (e && e.name) ? e.name : '')).filter(Boolean);
-          }
-          const exists = existingNames.includes(tmpName);
-          if (!exists) {
-            await client.createIndex({ name: tmpName, dimension: dim, metric: 'cosine', spec: { serverless: { cloud: env.pineconeCloud || 'aws', region: env.pineconeRegion || 'us-east-1' } } });
-          }
-          // switch to the temp index for this process
-          pineconeIndex = (typeof client.index === 'function') ? client.index(tmpName) : client.Index(tmpName);
-          // include namespace when provided (validation index may ignore it)
-          const tmpPayload = { records: [{ id, values: vector, metadata }] };
-          if (namespace) tmpPayload.namespace = namespace;
-          await pineconeIndex.upsert(tmpPayload);
-          logger.pineconeVerify({ status: 'upsert_to_validation_index', index: tmpName, id, namespace: namespace || null });
-
-          // verify
-          try {
-            const fetched = await pineconeIndex.fetch({ ids: [id], namespace: namespace });
-            const vec = (fetched && fetched.vectors && fetched.vectors[id]) || null;
-            if (!vec) {
-              logger.pineconeUpsert({ id, namespace, success: true, verification: 'validation_fetch_missing', index: tmpName });
-            } else {
-              const dim2 = Array.isArray(vec.values) ? vec.values.length : (vec?.values?.length || 0);
-              logger.pineconeUpsert({ id, namespace, success: true, verification: 'validation_fetch_ok', index: tmpName, metadata: vec.metadata || metadata, vectorLength: dim2, host: env.pineconeHost || null });
-            }
-          } catch (vfErr2) {
-            logger.pineconeUpsert({ id, namespace, success: true, verification: 'validation_fetch_error', index: tmpName, verificationError: vfErr2.message || String(vfErr2) });
-          }
-
-          return true;
-        } catch (err2) {
-          throw err2;
-        }
-      }
-      throw err;
-    }
+    const verification = await verifyPineconeUpsert(index, id, namespace, metadata);
+    logger.pineconeUpsert({ id, namespace, success: true, verification: verification.status, ...verification.meta });
+    return true;
   } catch (err) {
     pineconeUnavailable = true;
     logger.pineconeUpsert({ id, namespace, success: false, error: err.message || String(err) });
@@ -201,6 +164,30 @@ async function deleteLongTermVector(id, namespace) {
     pineconeUnavailable = true;
     console.warn('[PINECONE_SKIPPED] delete failed:', err && err.message ? err.message : err);
     return false;
+  }
+}
+
+async function deleteLongTermVectorsByMetadata(filter, namespace) {
+  try {
+    const index = await getIndex();
+    if (!index) {
+      return { deleted: false, count: 0, error: 'Pinecone index unavailable' };
+    }
+    if (!filter || typeof filter !== 'object' || Object.keys(filter).length === 0) {
+      return { deleted: false, count: 0, error: 'Metadata filter is required' };
+    }
+    if (typeof index.deleteMany !== 'function') {
+      return { deleted: false, count: 0, error: 'Installed Pinecone SDK does not support filtered deleteMany' };
+    }
+
+    const options = { filter };
+    if (namespace) options.namespace = namespace;
+    await index.deleteMany(options);
+    return { deleted: true, count: 0, filter, namespace: namespace || null };
+  } catch (err) {
+    pineconeUnavailable = true;
+    logger.pineconeVerify({ status: 'filtered_delete_failed', error: err.message || String(err) });
+    return { deleted: false, count: 0, error: err.message || String(err) };
   }
 }
 
@@ -301,6 +288,7 @@ module.exports = {
   getIndex,
   upsertLongTermVector,
   deleteLongTermVector,
+  deleteLongTermVectorsByMetadata,
   queryLongTermVectors,
   fetchLongTermByIds,
   isPineconeConfigured,

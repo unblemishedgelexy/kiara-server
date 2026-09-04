@@ -2,6 +2,7 @@ const createApp = require('./app');
 const connectDB = require('./db/connect');
 const { env } = require('./config/env');
 const promotionWorker = require('./services/memory/promotion/promotionWorker');
+const WorkingMemoryRedis = require('./services/workingMemory/redisOperations');
 
 async function startServer() {
   const dbConnected = await connectDB();
@@ -23,6 +24,8 @@ async function startServer() {
   if (promotionWorkerEnabled) {
     promotionWorker.startPromotionWorker();
   }
+
+  WorkingMemoryRedis.startRejectedMemoryCleanupScheduler();
 
   console.log('[SERVER_START]', 'Server ready.');
 

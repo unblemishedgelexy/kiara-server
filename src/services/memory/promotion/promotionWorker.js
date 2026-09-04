@@ -4,6 +4,7 @@ const { env } = require('../../../config/env');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 const memoryPromotionService = require('./memoryPromotionService');
 const logger = require('../utils/memoryLogger');
+const { isWipeInProgress } = require('../deletion/userMemoryWipeService');
 
 let promotionInterval = null;
 
@@ -38,8 +39,29 @@ async function _runPromotionCycle() {
       return;
     }
 
+    const redisService = require('../../infrastructure/redisService');
+
     for (const userId of userIds) {
       try {
+        if (await isWipeInProgress(userId)) {
+          logger.log('PROMOTION_SKIP_USER_WIPE_LOCKED', { userId });
+          continue;
+        }
+
+        // GUARD: Check if user's working memory still exists (prevent promotion after wipe)
+        const client = await redisService.getRedisClient();
+        if (client) {
+          const workingKey = WorkingMemoryRedis.buildKey(userId);
+          const exists = await client.exists(workingKey);
+
+          if (!exists) {
+            // User was wiped; remove from queue and skip promotion
+            logger.log('PROMOTION_SKIP_USER_WIPED', { userId, reason: 'working_memory_not_found' });
+            await WorkingMemoryRedis.removePromotionCandidate(userId);
+            continue;
+          }
+        }
+
         const result = await memoryPromotionService.promoteUserMemory(userId);
         if (result?.keepQueued && result?.nextDueAt) {
           await WorkingMemoryRedis.deferPromotionCandidate(userId, result.nextDueAt);

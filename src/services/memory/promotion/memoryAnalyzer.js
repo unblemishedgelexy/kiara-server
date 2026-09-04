@@ -342,11 +342,19 @@ function groupSemanticMemories(facts) {
 }
 
 function buildFallbackFacts(transcript, userId) {
-  const sentences = splitSentences(transcript);
+  const userEntries = String(transcript || '')
+    .split(/\n\n+/)
+    .map((block) => {
+      const match = block.match(/^TURN_ID:([^\n]+)\nUSER:([^\n]*)/i);
+      return match ? { turnId: match[1].trim(), text: match[2].trim() } : null;
+    })
+    .filter(Boolean);
   const fallbackFacts = [];
   const seen = new Set();
 
-  for (const sentence of sentences) {
+  for (const entry of userEntries) {
+    const sentences = splitSentences(entry.text);
+    for (const sentence of sentences) {
     const extracted = extractFactsFromSentence(sentence);
     for (const fact of extracted) {
       const category = fact.category || 'facts';
@@ -354,11 +362,7 @@ function buildFallbackFacts(transcript, userId) {
       const key = fact.key || category;
       const value = fact.value || fact.content || '';
       const label = fact.label || key;
-      const sourceTurnIds = [];
-      const match = sentence.match(/TURN_ID:([^\n\r]+)/);
-      if (match) {
-        sourceTurnIds.push(match[1]);
-      }
+      const sourceTurnIds = [entry.turnId];
 
       const fingerprint = `${category}:${key}:${value}`.toLowerCase();
       if (seen.has(fingerprint) || !value) continue;
@@ -372,11 +376,15 @@ function buildFallbackFacts(transcript, userId) {
         value,
         confidenceScore: 0.72,
         importance: 0.55,
+        source: 'user',
+        userOwned: true,
+        memoryWorthy: true,
         reason: `Extracted from transcript using fallback regex: ${sentence}`.slice(0, 300),
         source_turn_ids: sourceTurnIds,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
+    }
     }
   }
 
@@ -424,6 +432,7 @@ async function analyzeConversation(turns, userId = 'unknown') {
     `- id: short unique id (you may synthesize but only if supported by text)\n` +
     `- type: short type string (e.g. 'fact','identity','project','goal','task','preference','event')\n` +
     `- category: one of [identity,relationships,preferences,projects,goals,long_term_facts,skills,locations,organizations,important_events,important_episodes,temporary_tasks,conversation_summary]\n` +
+    `- attribute: stable logical attribute name used to update the same memory (for example name, favorite_color, current_goal, project, skill)\n` +
     `- content: the textual content or value exactly supported by the transcript\n` +
     `- confidence: number between 0 and 1 (how sure you are)\n` +
     `- importance: number between 0 and 1 (how important to keep long-term)\n` +
@@ -432,9 +441,11 @@ async function analyzeConversation(turns, userId = 'unknown') {
     `- createdAt: ISO timestamp or null\n` +
     `- updatedAt: ISO timestamp or null\n` +
     `- memoryTTL: seconds this should be kept (or null)
-    - promotionPriority: 0-1\n\n` +
+    - promotionPriority: 0-1\n` +
     `Important rules:\n` +
     `- DO NOT INVENT facts. Only return memories that are directly supported by the transcript.\n` +
+    `- Only persist memories explicitly asserted by the USER. Assistant statements, questions, guesses, acknowledgements, summaries, and conversational fragments are not user-owned memories.\n` +
+    `- Each memory MUST include source_role (USER), user_owned (true), memory_worthy (true), user_assertion (true), and uncertainty (false).\n` +
     `- If nothing permanent exists, return {"memories": []}.\n` +
     `- The response MUST be valid JSON and ONLY JSON (no explanatory text).\n\n` +
     `Transcript:\n${transcript}\n\n`;
@@ -559,7 +570,7 @@ async function analyzeConversation(turns, userId = 'unknown') {
     const rejected = [];
     for (const m of parsed.memories) {
       // validate required fields
-      if (!m || !m.category || !m.content || !Array.isArray(m.source_turn_ids)) {
+      if (!m || !m.category || !m.attribute || !m.content || !Array.isArray(m.source_turn_ids)) {
         rejected.push({ item: m, reason: 'missing_required_fields' });
         continue;
       }
@@ -588,6 +599,14 @@ async function analyzeConversation(turns, userId = 'unknown') {
       mem.updatedAt = mem.updatedAt || mem.createdAt;
       mem.memoryTTL = mem.memoryTTL || null;
       mem.promotionPriority = Number(mem.promotionPriority || 0) || 0;
+      if (String(mem.source_role || '').toLowerCase() !== 'user'
+        || mem.user_owned !== true
+        || mem.memory_worthy !== true
+        || mem.user_assertion !== true
+        || mem.uncertainty === true) {
+        rejected.push({ item: m, reason: 'not_user_owned_memory' });
+        continue;
+      }
       accepted.push(mem);
     }
 
@@ -623,6 +642,8 @@ async function analyzeConversation(turns, userId = 'unknown') {
         importance: Number(a.importance || 0),
         reason: a.reason || '',
         source_turn_ids: a.source_turn_ids || [],
+        source: 'user',
+        memoryWorthy: true,
         createdAt: a.createdAt,
         updatedAt: a.updatedAt,
       };

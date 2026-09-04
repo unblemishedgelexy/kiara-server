@@ -87,8 +87,11 @@ async function queryNamespaces({ userId, text, topK = 5 }) {
   const matches = [];
   for (const ns of uniqueNs) {
     try {
-      // Query Pinecone for the requested namespace
-      const queryFilter = ns === 'relationships' ? { relationship: { $exists: true } } : {};
+      // Query Pinecone for the requested namespace with userId isolation
+      const queryFilter = { userId };  // Always include userId for cross-user isolation
+      if (ns === 'relationships') {
+        queryFilter.relationship = { $exists: true };
+      }
       logger.log('RETRIEVER_QUERY_INTENT', { userId, requestedNamespace: ns, queryNamespace: ns, filter: queryFilter, topK, host: env.pineconeHost || null });
       const raw = await pineconeService.queryLongTermVectors({ vector: embedding, topK, filter: queryFilter, namespace: ns });
       logger.log('RETRIEVER_QUERY_RESULT', { userId, requestedNamespace: ns, queryNamespace: ns, returnedNamespace: ns, returnedCount: Array.isArray(raw) ? raw.length : 0, host: env.pineconeHost || null });

@@ -14,10 +14,10 @@ const emailController = require('./controllers/emailController');
 const security = require('./middleware/security');
 const errorHandler = require('./middleware/errorHandler');
 const { env, isAllowedCorsOrigin } = require('./config/env');
+const { uploadsDir } = require('./services/infrastructure/uploadService');
 
 const createApp = () => {
   const app = express();
-  security(app);
 
   app.use(
   cors({
@@ -28,7 +28,7 @@ const createApp = () => {
         callback(new Error("CORS origin not allowed"));
       }
     },
-    credentials: true,
+    credentials: false,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "Accept",
@@ -38,6 +38,7 @@ const createApp = () => {
       "X-Client-Platform",
       "X-Memory-Trace-Id",
       "X-Request-Id",
+      "X-Kiara-Trigger",
       "X-Requested-With",
       "X-Refresh-Token", // ✅ Add this
     ],
@@ -45,10 +46,13 @@ const createApp = () => {
       "X-Memory-Trace-Id",
       "X-Request-Id",
     ],
+    maxAge: 86400,
     preflightContinue: false,
     optionsSuccessStatus: 204,
   })
 );
+
+  security(app);
 
   app.use((req, res, next) => {
     try {
@@ -70,6 +74,14 @@ const createApp = () => {
     req.rawBody = '';
     res.setHeader('X-Request-Id', req.requestId);
     res.setHeader('X-Memory-Trace-Id', req.memoryTraceId);
+    req.lifecycleTrigger = typeof req.headers['x-kiara-trigger'] === 'string' && req.headers['x-kiara-trigger'].trim()
+      ? req.headers['x-kiara-trigger'].trim()
+      : 'USER_ACTION';
+    const requestStartedAt = Date.now();
+    console.info('[REQUEST_START]', JSON.stringify({ requestId: req.requestId, trigger: req.lifecycleTrigger, endpoint: req.originalUrl, method: req.method, start: new Date().toISOString() }));
+    res.once('finish', () => {
+      console.info('[REQUEST_END]', JSON.stringify({ requestId: req.requestId, trigger: req.lifecycleTrigger, route: req.originalUrl, status: res.statusCode, durationMs: Date.now() - requestStartedAt, end: new Date().toISOString(), userId: req.userId || null }));
+    });
     next();
   });
 
@@ -88,6 +100,8 @@ const createApp = () => {
       }
     },
   }));
+
+  app.use('/uploads', express.static(uploadsDir));
 
   app.use('/api/auth', authRoutes);
   app.use('/auth', authRoutes);

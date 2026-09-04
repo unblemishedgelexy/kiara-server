@@ -353,7 +353,7 @@ const MemoryService = {
    * @param {number} [opts.ttl]         — seconds, default 3600
    * @returns {Promise<{success:boolean, memorySaved:boolean, turnId:string|null, totalTurns:number, ttl:number}>}
    */
-  async saveTurn({ userId, sessionId, userMessage, aiResponse, ttl = DEFAULT_TTL, memoryTraceId = createMemoryTraceId() }) {
+  async saveTurn({ userId, sessionId, userMessage, aiResponse, ttl = DEFAULT_TTL, conversationTurnId = null, memoryTraceId = createMemoryTraceId() }) {
     if (!userId || !sessionId) {
       return { success: false, memorySaved: false, turnId: null, totalTurns: 0, ttl, timestamp: new Date().toISOString(), skipped: true, reason: 'missing_user_or_session' };
     }
@@ -363,9 +363,15 @@ const MemoryService = {
     }
 
     let saveStartedAt = Date.now();
+    const semanticStatus = {
+      status: 'NOT_MEMORY_WORTHY',
+      saved: false,
+      count: 0,
+      dependency: null,
+    };
     try {
       const normalizedText = String(userMessage || '').replace(/\s+/g, ' ').trim();
-      traceLog('normalized_input', { memoryTraceId, originalText: String(userMessage || ''), normalizedText });
+      traceLog('normalized_input', { memoryTraceId, userId, operation: 'save_turn', inputLength: String(userMessage || '').length, normalizedLength: normalizedText.length });
       traceLog('working_memory_before', { memoryTraceId, userId, sessionId, existingTurnCount: 0, recentTurns: [] });
       console.info('[ENTERED] MemoryService.saveTurn', { userId, sessionId, userMessageLength: userMessage?.length, aiResponseLength: aiResponse?.length, ttl });
       _validateTurnInputs(userId, sessionId, userMessage, aiResponse);
@@ -377,16 +383,20 @@ const MemoryService = {
       logger.log('STM_SAVE', { userId, sessionId, ttl, status: 'starting', ts: new Date().toISOString() });
       logger.stmSaveStart({ userId, sessionId, ttl, status: 'starting' });
       const result = await WorkingMemoryRedis.saveConversationTurn(
-        userId, sessionId, userMessage, aiResponse, ttl
+        userId, sessionId, userMessage, aiResponse, ttl, { memoryTraceId, conversationTurnId }
       );
+      if (result?.duplicate) {
+        traceLog('duplicate_event_ignored', { memoryTraceId, userId, sessionId, conversationTurnId, operation: 'save_turn' });
+        return { ...result, memoryTraceId };
+      }
       const saveDurationMs = Date.now() - saveStartedAt;
       traceLog('working_memory_save', {
         memoryTraceId,
         turnId: result && result.turnId,
         userId,
         sessionId,
-        userMessage: String(userMessage || ''),
-        assistantMessage: String(aiResponse || ''),
+        userMessageLength: String(userMessage || '').length,
+        assistantMessageLength: String(aiResponse || '').length,
         totalTurns: result && result.totalTurns,
         success: Boolean(result && result.success !== false),
       });
@@ -409,7 +419,7 @@ const MemoryService = {
         memoryId: result.turnId,
         category: 'conversation',
         key: `memory:working:${userId}`,
-        value: JSON.stringify({ userMessage, assistantMessage: aiResponse }),
+        valueSummary: JSON.stringify({ userMessageLength: String(userMessage || '').length, assistantMessageLength: String(aiResponse || '').length }),
         confidence: 1,
         sourceTurnId: result.turnId,
         sourceConversationId: sessionId,
@@ -425,10 +435,14 @@ const MemoryService = {
         ttl,
         timestamp:   new Date().toISOString(),
         memoryTraceId,
+        stm: { status: 'SUCCESS', saved: true, turnId: result.turnId },
+        canonicalSemantic: semanticStatus,
       };
 
       try {
         const { extractMemoryCandidates, extractCanonicalSemanticMemories } = require('./extraction');
+        const { shouldUseSemanticUnderstanding, understandUserMemory } = require('./semanticMemoryUnderstanding');
+        traceLog('extraction_started', { memoryTraceId, userId, sessionId, operation: 'save_turn', method: 'rule_based_candidates_and_canonical', inputLength: normalizedText.length });
         
         // CRITICAL FIX: Extract from user message and assistant message SEPARATELY
         // with source tracking. Never mix AI-generated text with user assertions about identity.
@@ -439,6 +453,7 @@ const MemoryService = {
           sourceTurnId: result.turnId,
           sourceRole: 'user'  // User-originated statement
         });
+        traceLog('raw_extraction_result', { memoryTraceId, userId, source: 'user', extractedCount: userExtracted.length, rejectedCount: 0, parseStatus: 'completed', categories: userExtracted.map((candidate) => candidate.category) });
         if (userExtracted.length) {
           logger.log('MEMORY_CANDIDATE_EXTRACTED_FROM_USER', {
             userId,
@@ -466,15 +481,37 @@ const MemoryService = {
         }
 
         // Extract canonical memories from user message only (primary identity source)
-        const userCanonicalGroup = extractCanonicalSemanticMemories(userMessage, { 
+        const deterministicUserCanonicalGroup = /[?؟]$/.test(String(userMessage || '').trim())
+          ? {}
+          : extractCanonicalSemanticMemories(userMessage, { 
           memoryTraceId, 
           sourceTurnId: result.turnId,
           sourceRole: 'user'
         });
+        const semanticUserCanonicalGroup = shouldUseSemanticUnderstanding(userMessage, deterministicUserCanonicalGroup)
+          ? await understandUserMemory(userMessage, { userId, memoryTraceId, sourceTurnId: result.turnId })
+          : null;
+        const userCanonicalGroup = semanticUserCanonicalGroup === null
+          ? deterministicUserCanonicalGroup
+          : (Object.keys(semanticUserCanonicalGroup).length ? semanticUserCanonicalGroup : {});
+        if (semanticUserCanonicalGroup === null && Object.keys(deterministicUserCanonicalGroup).length === 0) {
+          semanticStatus.status = 'UNAVAILABLE_DEPENDENCY';
+          semanticStatus.dependency = 'semantic_understanding';
+        }
         const userCanonicalEntries = Object.values(userCanonicalGroup).flat();
+        traceLog('normalization_completed', { memoryTraceId, userId, source: 'user', normalizedCount: userCanonicalEntries.length, memories: userCanonicalEntries.map((item) => ({ category: item.category, logicalKey: item.logicalKey || item.key, attribute: item.attribute || item.key, value: String(item.value || '').slice(0, 80), confidence: item.confidenceScore || item.confidence || null })) });
         
         if (userCanonicalEntries.length) {
-          const saved = await WorkingMemoryRedis.upsertSemanticMemories(userId, userCanonicalGroup, { source: 'user', turnId: result.turnId });
+          semanticStatus.status = 'STORAGE_FAILURE';
+          traceLog('semantic_write_before', { memoryTraceId, userId, source: 'user', authority: 'user', confidence: userCanonicalEntries.map((item) => item.confidenceScore || item.confidence || null), logicalKeys: userCanonicalEntries.map((item) => item.logicalKey || item.key), incomingValues: userCanonicalEntries.map((item) => String(item.value || '').slice(0, 80)), existingActiveCandidateCount: 0 });
+          const saved = await WorkingMemoryRedis.upsertSemanticMemories(userId, userCanonicalGroup, { source: 'user', turnId: result.turnId, memoryTraceId });
+          semanticStatus.saved = saved > 0;
+          semanticStatus.count = saved;
+          semanticStatus.status = saved > 0 ? 'SUCCESS' : 'STORAGE_FAILURE';
+          traceLog('semantic_redis_write_result', { memoryTraceId, userId, operation: 'upsert_semantic', key: WorkingMemoryRedis.buildSemanticMemoryKey(userId), success: saved > 0, resultingStatus: saved > 0 ? 'active_or_resolved' : 'not_written', memoryCount: saved, logicalKeys: userCanonicalEntries.map((item) => item.logicalKey || item.key) });
+          const postSaveSemantic = await WorkingMemoryRedis.getSemanticMemories(userId);
+          const postSaveEntries = Object.values(postSaveSemantic || {}).flat().filter(Boolean);
+          traceLog('semantic_post_save_check', { memoryTraceId, userId, operation: 'semantic_post_save_check', category: 'identity', logicalKey: 'identity:name', present: postSaveEntries.some((item) => item.category === 'identity' && String(item.logicalKey || item.key || '').includes('name')), valuePresent: postSaveEntries.some((item) => item.category === 'identity' && String(item.logicalKey || item.key || '').includes('name') && Boolean(item.value)), activeCurrentCount: postSaveEntries.length, store: 'redis' });
           logger.log('MEMORY_CANONICAL_SEMANTIC_SAVED_FROM_USER', {
             userId,
             sessionId,
@@ -482,47 +519,43 @@ const MemoryService = {
             categories: Object.keys(userCanonicalGroup),
             sample: userCanonicalEntries[0]?.value || '',
           });
+        } else {
+          if (semanticStatus.status !== 'UNAVAILABLE_DEPENDENCY') {
+            semanticStatus.status = 'NOT_MEMORY_WORTHY';
+          }
+          traceLog('semantic_redis_write_result', { memoryTraceId, userId, operation: 'upsert_semantic', success: false, resultingStatus: 'skipped', memoryCount: 0, reason: 'no_canonical_user_memory' });
         }
+        traceLog('working_memory_write_result', { memoryTraceId, userId, operation: 'save_turn', success: Boolean(result?.success), memoryId: result?.turnId || null, store: 'redis', status: 'active' });
 
-        // Extract canonical from assistant only for non-identity categories
+        // Assistant output remains conversation/episodic evidence, never canonical user truth.
         const assistantCanonicalGroup = extractCanonicalSemanticMemories(aiResponse, { 
           memoryTraceId, 
           sourceTurnId: result.turnId,
           sourceRole: 'assistant'
         });
         
-        // Filter out identity facts from assistant extraction - they should NOT overwrite user identity
-        const filteredAssistantGroup = {};
-        for (const [category, items] of Object.entries(assistantCanonicalGroup)) {
-          if (category === 'identity') {
-            // Skip assistant-generated identity facts - they are never authoritative
-            logger.log('MEMORY_ASSISTANT_IDENTITY_REJECTED', {
-              userId,
-              sessionId,
-              rejectedFacts: items.map(i => i.value),
-              reason: 'assistant_identity_never_overwrites_user_identity'
-            });
-            continue;
-          }
-          filteredAssistantGroup[category] = items;
-        }
-
-        const assistantCanonicalEntries = Object.values(filteredAssistantGroup).flat();
+        const assistantCanonicalEntries = Object.values(assistantCanonicalGroup).flat();
         if (assistantCanonicalEntries.length) {
-          const saved = await WorkingMemoryRedis.upsertSemanticMemories(userId, filteredAssistantGroup, { source: 'assistant', turnId: result.turnId });
           logger.log('MEMORY_CANONICAL_SEMANTIC_SAVED_FROM_ASSISTANT', {
             userId,
             sessionId,
-            savedCount: saved,
-            categories: Object.keys(filteredAssistantGroup),
-            sample: assistantCanonicalEntries[0]?.value || '',
+            savedCount: 0,
+            rejectedCount: assistantCanonicalEntries.length,
+            categories: Object.keys(assistantCanonicalGroup),
+            reason: 'assistant_output_is_not_user_asserted_truth',
           });
         }
       } catch (candidateError) {
+        semanticStatus.status = candidateError?.message?.toLowerCase().includes('gemini')
+          ? 'UNAVAILABLE_DEPENDENCY'
+          : 'STORAGE_FAILURE';
+        semanticStatus.dependency = candidateError?.code || candidateError?.name || 'semantic_pipeline';
+        traceLog('extraction_pipeline_failed', { memoryTraceId, userId, sessionId, operation: 'save_turn', status: 'failed', reason: candidateError.message || String(candidateError) });
         logger.logError('MEMORY_CANDIDATE_PIPELINE_ERROR', candidateError.message || String(candidateError), candidateError.stack || null, userId, sessionId);
       }
 
-      console.info('[OUTPUT] MemoryService.saveTurn', { success: true, turnId: result.turnId, totalTurns: result.totalTurns });
+      output.canonicalSemantic = semanticStatus;
+      console.info('[OUTPUT] MemoryService.saveTurn', { success: true, turnId: result.turnId, totalTurns: result.totalTurns, semanticStatus: semanticStatus.status });
       console.info('[EXITED] MemoryService.saveTurn', { userId, sessionId, timestamp: new Date().toISOString() });
 
       return output;
@@ -643,10 +676,17 @@ const MemoryService = {
 
       const turns = await WorkingMemoryRedis.getRecentMemory(userId);
       const recentTurns = Array.isArray(turns) ? turns.slice(0, limit) : [];
-      const context = recentTurns.map((turn) => {
+      const turnContext = recentTurns.map((turn) => {
         const assistant = String(turn.aiResponse || turn.assistantResponse || turn.assistantMessage || '').trim();
         return `User: ${turn.userMessage}\nAssistant: ${assistant}\n\n`;
       }).join('');
+
+      const semantic = await WorkingMemoryRedis.getSemanticMemories(userId);
+      const semanticEntries = Object.values(semantic || {}).flat().filter(Boolean);
+      const semanticContext = semanticEntries.length
+        ? `Current structured memory:\n${semanticEntries.map((item) => `${item.category || 'memory'}: ${item.value}`).join('\n')}\n\n`
+        : '';
+      const context = `${semanticContext}${turnContext}`;
 
       const turnsUsed = recentTurns.length;
 
@@ -672,6 +712,84 @@ const MemoryService = {
   /**
    * Delete all working memory for a user.
    */
+  async deleteSemanticMemory(userId, requestText = '') {
+    try {
+      if (!userId || !String(requestText || '').trim()) {
+        return { success: false, deleted: 0, userId, reason: 'missing_user_or_request' };
+      }
+
+      const text = String(requestText || '').trim();
+      const { analyzeQuery } = require('./utils/queryAnalyzer');
+      const analysis = analyzeQuery(text, {});
+      const lower = text.toLowerCase();
+      const isForgetRequest = analysis.intent === 'memory_delete' || /(forget|delete|remove|bhool|mita|mat\s+rakhna|yaad\s+mat)/i.test(lower);
+      if (!isForgetRequest) {
+        return { success: false, deleted: 0, userId, reason: 'not_a_delete_request' };
+      }
+
+      const semantic = await WorkingMemoryRedis.getSemanticMemories(userId);
+      const categoryHints = [];
+      if (/(preference|favorite|pasand|like|color|food|movie|song|book|drink|music|taste)/i.test(lower)) categoryHints.push('preference');
+      if (/(goal|target|objective|plan|startup|aim|ambition|dream)/i.test(lower)) categoryHints.push('goal');
+      if (/(identity|name|naam)/i.test(lower)) categoryHints.push('identity');
+      if (/(skill|coding|programming|design|learning|practice)/i.test(lower)) categoryHints.push('skill');
+      if (/(project|build|develop|app|website|product)/i.test(lower)) categoryHints.push('project');
+      if (/(relationship|friend|brother|sister|mother|father|family)/i.test(lower)) categoryHints.push('relationship');
+      if (/(fact|study|ai|ml|python|course|topic|learning)/i.test(lower)) categoryHints.push('fact');
+
+      const allActiveEntries = Object.values(semantic).flat();
+      const valueCriteria = [];
+      for (const item of allActiveEntries) {
+        const value = String(item.value || '').toLowerCase();
+        const category = String(item.category || '').toLowerCase();
+        if (value && lower.includes(value)) {
+          valueCriteria.push({ category, attribute: item.attribute || item.key, value: item.value });
+        }
+      }
+
+      const deleteCriteria = valueCriteria.length
+        ? valueCriteria
+        : categoryHints.map((category) => ({ category }));
+
+      const uniqueCriteria = deleteCriteria.filter((criterion, index, arr) => {
+        const serial = JSON.stringify(criterion);
+        return arr.findIndex((entry) => JSON.stringify(entry) === serial) === index;
+      });
+
+      const deletedCount = uniqueCriteria.length ? await WorkingMemoryRedis.deleteSemanticMemories(userId, uniqueCriteria) : 0;
+      const remaining = await WorkingMemoryRedis.getSemanticMemories(userId);
+      const deletedValues = allActiveEntries
+        .filter((item) => uniqueCriteria.some((criterion) => {
+          if (criterion.category && String(item.category || '').toLowerCase() !== String(criterion.category).toLowerCase()) return false;
+          if (criterion.attribute && String(item.attribute || item.key || '').toLowerCase() !== String(criterion.attribute).toLowerCase()) return false;
+          if (criterion.value && !String(item.value || '').toLowerCase().includes(String(criterion.value).toLowerCase())) return false;
+          return true;
+        }))
+        .map((item) => item.value);
+
+      return {
+        success: deletedCount > 0 || uniqueCriteria.length === 0,
+        deleted: deletedCount,
+        userId,
+        requestText: text,
+        deletedValues,
+        remainingActive: Object.values(remaining).flat().length,
+        timestamp: new Date().toISOString(),
+        reason: deletedCount > 0 || uniqueCriteria.length === 0 ? 'semantic_memory_delete_processed' : 'nothing_matched',
+      };
+    } catch (err) {
+      logger.error('DELETE_SEMANTIC_MEMORY_ERROR', err, { userId, requestText });
+      return { success: false, deleted: 0, userId, reason: err.message || 'delete_failed' };
+    }
+  },
+
+  async getMemoryLineage(userId, memoryId) {
+    if (!userId || !memoryId) {
+      return null;
+    }
+    return WorkingMemoryRedis.getMemoryLineage(userId, memoryId);
+  },
+
   async deleteUserMemory(userId) {
     try {
       if (!userId) {
@@ -769,16 +887,19 @@ const MemoryService = {
 
       // Use new intelligent retrieval orchestrator
       const retrievalStart = Date.now();
+      const memoryTraceId = opts.memoryTraceId || createMemoryTraceId();
+      traceLog('context_assembly_started', { memoryTraceId, userId, sessionId, operation: 'retrieve_and_assemble', queryIntent: String(userQuery || '').length ? 'query_present' : 'session_bootstrap' });
       const result = await memoryOrchestrator.retrieveMemoryWithEscalation(
         userId,
         sessionId,
         userQuery,
-        { isLiveContext, activeContext }
+        { isLiveContext, activeContext, memoryTraceId }
       );
       const retrievalDuration = Date.now() - retrievalStart;
 
-      traceLog('memory_retrieval_start', { memoryTraceId: createMemoryTraceId(), query: String(userQuery || ''), userId, sessionId });
-      traceLog('working_memory_retrieved', { memoryTraceId: createMemoryTraceId(), count: Array.isArray(result.allMemories) ? result.allMemories.length : 0, memories: Array.isArray(result.allMemories) ? result.allMemories.slice(0, 10) : [] });
+      traceLog('memory_retrieval_result', { memoryTraceId, userId, sessionId, operation: 'retrieve_and_assemble', found: Boolean(result.retrievedMemoriesCount), memoryCount: result.retrievedMemoriesCount || 0, source: result.source || null, categories: Array.from(new Set((result.allMemories || []).map((item) => item.category || item.type).filter(Boolean))) });
+      traceLog('memory_revision_decision', { memoryTraceId, userId, sessionId, memoryRevision: result.memoryRevision || 0, contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0, cache: 'bypassed_fresh_redis_read', decision: 'current_canonical_context' });
+      traceLog('context_contents_summary', { memoryTraceId, userId, memoryCount: result.retrievedMemoriesCount || 0, identityMemoryPresent: (result.allMemories || []).some((item) => item.category === 'identity'), contextLength: String(result.context || '').length, operation: 'context_assembly' });
       logger.log('INTELLIGENT_RETRIEVAL', {
         userId,
         sessionId,
@@ -802,7 +923,7 @@ const MemoryService = {
         source: result.queryAnalysis?.intent || 'unknown',
       });
       traceLog('memory_composer', {
-        memoryTraceId: createMemoryTraceId(),
+        memoryTraceId,
         workingMemory: Array.isArray(result.allMemories) ? result.allMemories.slice(0, 10) : [],
         episodicMemory: [],
         semanticMemory: [],
@@ -818,6 +939,8 @@ const MemoryService = {
         task: null,
         turnCount: result.retrievedMemoriesCount || 0,
         contextPacket: result.contextPacket || null,
+        memoryRevision: result.memoryRevision || 0,
+        contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
       };
 
     } catch (err) {

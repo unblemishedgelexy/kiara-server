@@ -14,6 +14,7 @@ const {
   JSONParseError,
 } = require('../../utils/workingMemory/errors');
 const logger = require('../../utils/workingMemory/logger');
+const { log: traceLog } = require('../memory/utils/memoryTrace');
 
 const MEMORY_SLIDING_WINDOW_MS = 20 * 60 * 1000; // 20 minutes
 const INACTIVE_KEY_TTL_SECONDS = 24 * 60 * 60; // 24 hours
@@ -21,6 +22,42 @@ const PROMOTION_INTERVAL_MS = 15 * 60 * 1000;
 const PROMOTION_QUEUE_TTL_SECONDS = 7 * 24 * 60 * 60;
 const PROMOTION_RETRY_BASE_MS = 60 * 1000;
 const PROMOTION_RETRY_MAX_MS = 15 * 60 * 1000;
+const REJECTED_MEMORY_RETENTION_SECONDS = 7 * 24 * 60 * 60; // 7 days
+const REJECTED_MEMORY_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60; // 24 hours
+const SEMANTIC_WRITE_LOCK_TTL_SECONDS = 15;
+const SEMANTIC_WRITE_LOCK_RETRIES = 200;
+const SEMANTIC_WRITE_LOCK_RETRY_MS = 50;
+let rejectedMemoryCleanupTimer = null;
+
+function relatedHasMemoryId(related, memoryId) {
+  return Array.from(related.values()).some((item) => item.memoryId === String(memoryId) || item.id === String(memoryId));
+}
+
+function buildSemanticVersionId(logicalKey) {
+  return `${logicalKey}:version:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
+}
+
+async function acquireSemanticWriteLock(client, userId) {
+  const lockKey = `memory:longterm:semantic:lock:${userId}`;
+  const lockId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  for (let attempt = 0; attempt < SEMANTIC_WRITE_LOCK_RETRIES; attempt += 1) {
+    const acquired = await client.set(lockKey, lockId, { NX: true, EX: SEMANTIC_WRITE_LOCK_TTL_SECONDS });
+    if (acquired) return { lockKey, lockId };
+    await new Promise((resolve) => setTimeout(resolve, SEMANTIC_WRITE_LOCK_RETRY_MS));
+  }
+  throw new RedisTimeoutError(`Timed out acquiring semantic memory write lock for ${userId}`);
+}
+
+async function releaseSemanticWriteLock(client, lock) {
+  if (!lock) return;
+  try {
+    if (await client.get(lock.lockKey) === lock.lockId) {
+      await client.del(lock.lockKey);
+    }
+  } catch {
+    // The short TTL remains the fallback if release is interrupted.
+  }
+}
 
 class WorkingMemoryRedis {
   /**
@@ -49,6 +86,39 @@ class WorkingMemoryRedis {
     return `memory:longterm:semantic:${userId}`;
   }
 
+  static buildSemanticMemoryRevisionKey(userId) {
+    return `memory:semantic:revision:${userId}`;
+  }
+
+  static async getSemanticMemoryRevision(userId) {
+    if (!userId) return 0;
+    try {
+      const client = await redisService.getRedisClient();
+      if (!client) throw new RedisConnectionError('Redis client not initialized');
+      const revisionKey = this.buildSemanticMemoryRevisionKey(userId);
+      const existingRevision = Number(await client.get(revisionKey)) || 0;
+      if (existingRevision > 0) return existingRevision;
+
+      const raw = await client.hGetAll(this.buildSemanticMemoryKey(userId));
+      const hasCanonicalMemory = Object.values(raw || {}).some((value) => {
+        try {
+          const item = JSON.parse(value);
+          return item
+            && this.normalizeStatus(item.status || 'active') === 'active'
+            && ['user', 'import'].includes(this.normalizeSource(item.source || 'unknown'));
+        } catch {
+          return false;
+        }
+      });
+      if (!hasCanonicalMemory) return 0;
+      await client.set(revisionKey, '1');
+      return 1;
+    } catch (error) {
+      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, 'getSemanticMemoryRevision');
+      return 0;
+    }
+  }
+
   static flattenHashEntries(fields) {
     if (!fields || typeof fields !== 'object') {
       return [];
@@ -64,6 +134,91 @@ class WorkingMemoryRedis {
   static normalizeRedisString(value) {
     if (value === undefined || value === null) return '';
     return typeof value === 'string' ? value : String(value);
+  }
+
+  static normalizeSource(source) {
+    const normalized = String(source || 'unknown').toLowerCase();
+    return ['user', 'assistant', 'system', 'import'].includes(normalized) ? normalized : 'unknown';
+  }
+
+  static getSourcePriority(source) {
+    const normalized = this.normalizeSource(source);
+    const weights = { user: 4, import: 3, system: 2, assistant: 1, unknown: 0 };
+    return weights[normalized] ?? 0;
+  }
+
+  static isCurrentCanonicalMemory(item) {
+    if (!item || typeof item !== 'object') return false;
+    const source = this.normalizeSource(item.source || 'unknown');
+    const status = this.normalizeStatus(item.status || 'active');
+    const confidence = Number(item.confidenceScore || item.confidence || 0);
+    return status === 'active'
+      && (source === 'import' || item.userOwned === true || item.user_owned === true)
+      && item.memoryWorthy !== false
+      && confidence >= 0.55;
+  }
+
+  static normalizeStatus(status) {
+    const normalized = String(status || 'active').toLowerCase();
+    if (normalized === 'superseded') return 'superseded';
+    if (normalized === 'deleted') return 'deleted';
+    if (normalized === 'rejected') return 'rejected';
+    return 'active';
+  }
+
+  static getRejectedMemoryRetentionSeconds() {
+    return REJECTED_MEMORY_RETENTION_SECONDS;
+  }
+
+  static getRejectedMemoryCleanupIntervalMs() {
+    return REJECTED_MEMORY_CLEANUP_INTERVAL_SECONDS * 1000;
+  }
+
+  static getLogicalMemoryKey(item) {
+    if (!item || typeof item !== 'object') return 'memory';
+    const category = String(item.category || 'memory').toLowerCase();
+    let attribute = String(item.attribute || item.key || category || 'memory').toLowerCase();
+    if (category === 'identity') {
+      attribute = 'name';
+    }
+    if (category === 'preference') {
+      attribute = attribute.replace(/^favourite_/, 'favorite_').replace(/^colour$/, 'color');
+    }
+    return `${category}:${attribute}`;
+  }
+
+  static isPreferredActiveMemory(candidate, current) {
+    if (!current) return true;
+
+    const candidatePriority = this.getSourcePriority(candidate.source);
+    const currentPriority = this.getSourcePriority(current.source);
+    if (candidatePriority !== currentPriority) return candidatePriority > currentPriority;
+
+    const candidateConfidence = Number(candidate.confidenceScore || candidate.confidence || 0);
+    const currentConfidence = Number(current.confidenceScore || current.confidence || 0);
+    if (candidateConfidence !== currentConfidence) return candidateConfidence > currentConfidence;
+
+    const candidateUpdatedAt = Date.parse(candidate.updatedAt || candidate.createdAt || '') || 0;
+    const currentUpdatedAt = Date.parse(current.updatedAt || current.createdAt || '') || 0;
+    return candidateUpdatedAt > currentUpdatedAt;
+  }
+
+  static removeLogicalKeyEntries(mergedEntries, logicalKey) {
+    if (!mergedEntries || typeof mergedEntries !== 'object' || !logicalKey) {
+      return mergedEntries;
+    }
+
+    for (const [hashKey, entry] of Object.entries(mergedEntries)) {
+      if (!entry || typeof entry !== 'object') continue;
+      if (this.getLogicalMemoryKey(entry) === logicalKey && this.normalizeStatus(entry.status || 'active') === 'active') {
+        delete mergedEntries[hashKey];
+      }
+    }
+
+    if (mergedEntries[logicalKey] && this.normalizeStatus(mergedEntries[logicalKey].status || 'active') === 'active') {
+      delete mergedEntries[logicalKey];
+    }
+    return mergedEntries;
   }
 
   static buildHashEntries(fields) {
@@ -305,6 +460,19 @@ class WorkingMemoryRedis {
         throw new RedisConnectionError('Redis client not initialized');
       }
 
+      const conversationTurnId = metadata.conversationTurnId;
+      const idempotencyKey = conversationTurnId
+        ? `memory:turn:event:${String(userId)}:${String(conversationTurnId)}`
+        : null;
+      if (idempotencyKey) {
+        const claimed = await client.set(idempotencyKey, JSON.stringify({ status: 'processing' }), { NX: true, EX: INACTIVE_KEY_TTL_SECONDS });
+        if (claimed !== 'OK') {
+          const existing = await client.get(idempotencyKey);
+          const parsed = existing ? JSON.parse(existing) : {};
+          return { success: true, duplicate: true, totalTurns: parsed.totalTurns || 0, turnId: parsed.turnId || null };
+        }
+      }
+
       const key = this.buildKey(userId);
       const existingTurnsCount = await client.lLen(key);
       console.info('[INPUT] WorkingMemoryRedis.saveConversationTurn', { key, existingTurnsCount });
@@ -338,6 +506,7 @@ class WorkingMemoryRedis {
       const saveDurationMs = Date.now() - start;
 
       console.info('[RPUSH_RESULT] WorkingMemoryRedis.saveConversationTurn', { key, results, durationMs: saveDurationMs });
+      traceLog('redis_working_write_result', { traceId: metadata.memoryTraceId, userId, sessionId, operation: 'rpush_working_memory', key, success: true, resultingStatus: 'active', memoryId: turnId || null, durationMs: saveDurationMs });
 
       if (!results || results.length < 2) {
         throw new RedisConnectionError('Pipeline execution failed');
@@ -351,6 +520,10 @@ class WorkingMemoryRedis {
       }
 
       const totalTurns = await client.lLen(key);
+
+      if (idempotencyKey) {
+        await client.set(idempotencyKey, JSON.stringify({ status: 'completed', totalTurns, turnId }), { EX: INACTIVE_KEY_TTL_SECONDS });
+      }
 
       // Compression telemetry: measure characters before/after and report
       try {
@@ -382,7 +555,9 @@ class WorkingMemoryRedis {
             timestamp,
           },
         });
+        traceLog('mongo_backup_result', { traceId: metadata.memoryTraceId, userId, sessionId, operation: 'conversation_turn_backup', attempted: true, success: true, affectedRecordType: 'ConversationTurn', memoryId: turnId });
       } catch (mongoError) {
+        traceLog('mongo_backup_result', { traceId: metadata.memoryTraceId, userId, sessionId, operation: 'conversation_turn_backup', attempted: true, success: false, affectedRecordType: 'ConversationTurn', memoryId: turnId, reason: mongoError.message || String(mongoError) });
         logger.logError(
           mongoError.name || 'MongoSaveError',
           mongoError.message || 'Failed to persist raw conversation turn to MongoDB',
@@ -923,19 +1098,8 @@ class WorkingMemoryRedis {
       return 0;
     }
 
-    const source = options.source || 'unknown';
+    const source = this.normalizeSource(options.source || 'unknown');
     const turnId = options.turnId || null;
-
-    console.info('[UPSERT_SEMANTIC_DEBUG]', {
-      userId,
-      source,
-      turnId,
-      inputKeys: Object.keys(semanticMemories),
-      inputDetail: Object.entries(semanticMemories).reduce((acc, [k, v]) => {
-        acc[k] = Array.isArray(v) ? v.map(item => ({category: item?.category, key: item?.key, value: String(item?.value || '').slice(0,40), source: item?.source})) : 'not-array';
-        return acc;
-      }, {})
-    });
 
     try {
       const client = await redisService.getRedisClient();
@@ -943,81 +1107,318 @@ class WorkingMemoryRedis {
         throw new RedisConnectionError('Redis client not initialized');
       }
 
-      const flattened = {};
-      
-      // CRITICAL: For identity memories, check existing confidence before overwriting
-      for (const [category, items] of Object.entries(semanticMemories)) {
-        if (!Array.isArray(items)) continue;
-        
-        for (const item of items) {
-          if (!item?.key || !item?.value) continue;
-          const fieldId = item.id || `${item.key}:${String(item.value).toLowerCase()}`;
-          const safeFieldId = String(fieldId).replace(/[^a-zA-Z0-9:_-]/g, '_').slice(0, 180);
-          const hashKey = `${category}:${safeFieldId}`;
-
-          // For identity category, check existing record's confidence
-          if (category === 'identity') {
-            const existingRaw = await client.hGet(this.buildSemanticMemoryKey(userId), hashKey);
-            if (existingRaw) {
-              const existing = JSON.parse(existingRaw);
-              const newConfidence = Number(item.confidenceScore || 0.75);
-              const existingConfidence = Number(existing.confidenceScore || 0.75);
-              const newSource = item.source || 'unknown';
-              const existingSource = existing.source || 'unknown';
-              
-              // If existing is from user and has high confidence, don't let lower-confidence AI text overwrite it
-              if (existingSource === 'user' && existingConfidence >= 0.9 && newSource === 'assistant' && newConfidence < existingConfidence) {
-                console.info('[IDENTITY_PROTECTION]', {
-                  userId,
-                  category,
-                  key: item.key,
-                  existingValue: existing.value,
-                  rejectedValue: item.value,
-                  existingSource,
-                  existingConfidence,
-                  newSource,
-                  newConfidence,
-                  reason: 'user_identity_protected_from_ai_overwrite'
-                });
-                continue;  // Skip this update
-              }
-            }
+      const semanticKey = this.buildSemanticMemoryKey(userId);
+      const semanticLock = await acquireSemanticWriteLock(client, userId);
+      try {
+      const existingRaw = await client.hGetAll(semanticKey);
+      const existingEntries = {};
+      for (const [hashKey, rawValue] of Object.entries(existingRaw || {})) {
+        try {
+          const parsed = JSON.parse(rawValue);
+          if (parsed && typeof parsed === 'object') {
+            existingEntries[hashKey] = parsed;
           }
-
-          flattened[hashKey] = JSON.stringify({
-            ...item,
-            category,
-            source: item.source || source,  // Use item source or fallback to parameter source
-            turnId: turnId || item.source_turn_ids?.[0],
-            updatedAt: new Date().toISOString(),
-          });
+        } catch {
+          // ignore malformed existing entry
         }
       }
 
-      console.info('[UPSERT_FLATTENED_DEBUG]', {
-        userId,
-        flattenedKeys: Object.keys(flattened).slice(0, 5),
-        flattenedSample: Object.entries(flattened)[0] ? {
-          key: Object.keys(flattened)[0],
-          value: JSON.parse(Object.values(flattened)[0])
-        } : null
-      });
+      const mergedEntries = { ...existingEntries };
+      const activeLogicalEntries = new Map();
+      for (const [entryHash, existing] of Object.entries(mergedEntries)) {
+        if (!existing || typeof existing !== 'object') continue;
+        if (this.normalizeStatus(existing.status || 'active') !== 'active') continue;
+        const logicalKey = this.getLogicalMemoryKey(existing);
+        if (!activeLogicalEntries.has(logicalKey)) {
+          activeLogicalEntries.set(logicalKey, { entryHash, entry: existing });
+        }
+      }
 
-      const entries = Object.entries(flattened);
-      if (!entries.length) {
+      const staleRedisFields = new Set();
+      const insertedKeys = new Set();
+      const canonicalChangedKeys = new Set();
+
+      for (const [category, items] of Object.entries(semanticMemories)) {
+        if (!Array.isArray(items)) continue;
+
+        for (const item of items) {
+          if (!item?.key || !item?.value) continue;
+
+          const normalizedItem = {
+            ...item,
+            category,
+            source: this.normalizeSource(item.source || source),
+            userOwned: item.userOwned === true || item.user_owned === true || this.normalizeSource(item.source || source) === 'user',
+            memoryWorthy: item.memoryWorthy !== false,
+            confidenceScore: Number.isFinite(Number(item.confidenceScore || item.confidence))
+              ? Number(item.confidenceScore || item.confidence)
+              : 0.8,
+            status: this.normalizeStatus(item.status || 'active'),
+            attribute: item.attribute || item.key,
+            turnId: turnId || item.source_turn_ids?.[0] || item.turnId || null,
+            updatedAt: new Date().toISOString(),
+            createdAt: item.createdAt || new Date().toISOString(),
+            logicalKey: null,
+          };
+
+          normalizedItem.logicalKey = this.getLogicalMemoryKey(normalizedItem);
+          normalizedItem.id = normalizedItem.id || `semantic:${category}:${String(normalizedItem.attribute || normalizedItem.key || 'memory').toLowerCase().replace(/[^a-z0-9_]+/g, '_').slice(0, 64)}`;
+          normalizedItem.memoryId = normalizedItem.memoryId || normalizedItem.id;
+          normalizedItem.parentMemoryId = normalizedItem.parentMemoryId || null;
+          normalizedItem.supersedesMemoryId = normalizedItem.supersedesMemoryId || null;
+          const logicalKey = normalizedItem.logicalKey;
+          const currentActive = activeLogicalEntries.get(logicalKey);
+          const currentValue = currentActive ? String(currentActive.entry.value || '').trim().toLowerCase() : null;
+          const candidateValue = String(normalizedItem.value || '').trim().toLowerCase();
+
+          if (['assistant', 'unknown'].includes(normalizedItem.source)) {
+            const activeParent = currentActive || Object.entries(mergedEntries)
+              .map(([entryHash, entry]) => ({ entryHash, entry }))
+              .find(({ entry }) => entry && this.getLogicalMemoryKey(entry) === logicalKey && this.normalizeStatus(entry.status || 'active') === 'active');
+            const rejectionReason = activeParent
+              ? 'lower_authority_than_active'
+              : (normalizedItem.source === 'assistant'
+                ? 'assistant_output_is_not_user_asserted_truth'
+                : 'missing_source_authority');
+            const rejectedHashKey = `${logicalKey}:rejected:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
+            mergedEntries[rejectedHashKey] = {
+              ...normalizedItem,
+              status: 'rejected',
+              reason: rejectionReason,
+              rejectionReason,
+              parentMemoryId: activeParent?.entry.memoryId || activeParent?.entry.id || activeParent?.entryHash || null,
+              rejectedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+            insertedKeys.add(rejectedHashKey);
+            traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'rejected', logicalKey, oldMemoryId: activeParent?.entry.memoryId || activeParent?.entry.id || null, newMemoryId: normalizedItem.memoryId || normalizedItem.id || null, sourceAuthority: normalizedItem.source, reason: rejectionReason });
+            continue;
+          }
+
+          const candidateIdAlreadyExists = Object.values(mergedEntries).some((entry) => {
+            if (!entry || typeof entry !== 'object') return false;
+            return (entry.memoryId || entry.id) === normalizedItem.memoryId;
+          });
+          if (currentActive && currentValue !== candidateValue && candidateIdAlreadyExists) {
+            normalizedItem.id = buildSemanticVersionId(logicalKey);
+            normalizedItem.memoryId = normalizedItem.id;
+          }
+
+          if (currentActive && currentValue === candidateValue) {
+            const activeEntry = {
+              ...currentActive.entry,
+              ...normalizedItem,
+              status: 'active',
+              memoryId: currentActive.entry.memoryId || currentActive.entry.id || normalizedItem.memoryId,
+              parentMemoryId: currentActive.entry.parentMemoryId || null,
+              supersedesMemoryId: currentActive.entry.supersedesMemoryId || null,
+              updatedAt: new Date().toISOString(),
+            };
+            this.removeLogicalKeyEntries(mergedEntries, logicalKey);
+            mergedEntries[logicalKey] = activeEntry;
+            activeLogicalEntries.set(logicalKey, { entryHash: logicalKey, entry: activeEntry });
+            insertedKeys.add(logicalKey);
+            traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'duplicate_selected', logicalKey, oldMemoryId: currentActive.entry.memoryId || currentActive.entry.id || null, newMemoryId: activeEntry.memoryId || activeEntry.id || null, reason: 'same_logical_key_and_value' });
+            continue;
+          }
+
+          if (currentActive) {
+            const existing = currentActive.entry;
+            const existingSourcePriority = this.getSourcePriority(existing.source || 'unknown');
+            const candidateSourcePriority = this.getSourcePriority(normalizedItem.source || 'unknown');
+            const existingConfidence = Number(existing.confidenceScore || existing.confidence || 0);
+            const candidateConfidence = Number(normalizedItem.confidenceScore || normalizedItem.confidence || 0);
+            const sameSource = this.normalizeSource(existing.source || 'unknown') === this.normalizeSource(normalizedItem.source || 'unknown');
+            const logicalKeyCorrection = currentValue !== candidateValue && sameSource && this.getLogicalMemoryKey(existing) === this.getLogicalMemoryKey(normalizedItem);
+            const shouldReplace = currentValue !== candidateValue && (
+              logicalKeyCorrection ||
+              candidateSourcePriority > existingSourcePriority ||
+              (candidateSourcePriority === existingSourcePriority && sameSource && candidateConfidence >= existingConfidence)
+            );
+
+            if (shouldReplace) {
+              const staleActiveHashKeys = [];
+              for (const [hashKey, entry] of Object.entries(mergedEntries)) {
+                if (!entry || typeof entry !== 'object') continue;
+                if (this.getLogicalMemoryKey(entry) === logicalKey && this.normalizeStatus(entry.status || 'active') === 'active') {
+                  staleActiveHashKeys.push(hashKey);
+                }
+              }
+
+              for (const staleHashKey of staleActiveHashKeys) {
+                const staleEntry = mergedEntries[staleHashKey];
+                if (!staleEntry || typeof staleEntry !== 'object') continue;
+                const supersededHashKey = `${logicalKey}:superseded:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
+                const superseded = {
+                  ...staleEntry,
+                  status: 'superseded',
+                  memoryId: staleEntry.memoryId || staleEntry.id || staleHashKey,
+                  updatedAt: new Date().toISOString(),
+                  supersededAt: new Date().toISOString(),
+                  previousVersion: staleEntry.previousVersion || staleEntry.id || null,
+                  replacedBy: normalizedItem.memoryId || normalizedItem.id || logicalKey,
+                  supersededBy: normalizedItem.memoryId || normalizedItem.id || logicalKey,
+                };
+                mergedEntries[supersededHashKey] = superseded;
+                delete mergedEntries[staleHashKey];
+              }
+
+              normalizedItem.status = 'active';
+              normalizedItem.attribute = normalizedItem.attribute || normalizedItem.key;
+              normalizedItem.source = this.normalizeSource(normalizedItem.source || source);
+              normalizedItem.turnId = turnId || normalizedItem.turnId || normalizedItem.source_turn_ids?.[0] || null;
+              normalizedItem.memoryId = normalizedItem.memoryId || normalizedItem.id;
+              normalizedItem.supersedesMemoryId = existing.memoryId || existing.id || currentActive.entryHash;
+              normalizedItem.parentMemoryId = null;
+
+              mergedEntries[logicalKey] = normalizedItem;
+              activeLogicalEntries.set(logicalKey, { entryHash: logicalKey, entry: normalizedItem });
+              insertedKeys.add(logicalKey);
+              canonicalChangedKeys.add(logicalKey);
+              traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'superseded', logicalKey, oldMemoryId: existing.memoryId || existing.id || null, newMemoryId: normalizedItem.memoryId || normalizedItem.id || null, sourceAuthority: normalizedItem.source, reason: logicalKeyCorrection ? 'same_source_correction' : 'higher_or_equal_authority' });
+              continue;
+            }
+
+            const rejectedEntry = {
+              ...normalizedItem,
+              logicalKey,
+              status: 'rejected',
+              reason: 'lower_authority_than_active',
+              rejectionReason: 'lower_authority_than_active',
+              parentMemoryId: currentActive?.entry.memoryId || currentActive?.entry.id || currentActive?.entryHash || null,
+              rejectedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              source: this.normalizeSource(normalizedItem.source || source),
+            };
+            const rejectedHashKey = `${logicalKey}:rejected:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
+            mergedEntries[rejectedHashKey] = rejectedEntry;
+            insertedKeys.add(rejectedHashKey);
+            traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'rejected', logicalKey, oldMemoryId: currentActive.entry.memoryId || currentActive.entry.id || null, newMemoryId: normalizedItem.memoryId || normalizedItem.id || null, sourceAuthority: normalizedItem.source, reason: 'lower_authority_than_active' });
+            continue;
+          }
+
+          normalizedItem.status = 'active';
+          normalizedItem.attribute = normalizedItem.attribute || normalizedItem.key;
+          normalizedItem.source = this.normalizeSource(normalizedItem.source || source);
+          normalizedItem.turnId = turnId || normalizedItem.turnId || normalizedItem.source_turn_ids?.[0] || null;
+          normalizedItem.memoryId = normalizedItem.memoryId || normalizedItem.id;
+
+          mergedEntries[logicalKey] = normalizedItem;
+          activeLogicalEntries.set(logicalKey, { entryHash: logicalKey, entry: normalizedItem });
+          insertedKeys.add(logicalKey);
+          canonicalChangedKeys.add(logicalKey);
+          traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'created', logicalKey, oldMemoryId: null, newMemoryId: normalizedItem.memoryId || normalizedItem.id || null, sourceAuthority: normalizedItem.source, reason: 'no_active_candidate' });
+        }
+      }
+
+      if (!insertedKeys.size && !Object.keys(mergedEntries).length) {
         return 0;
       }
 
-      const flatValues = this.buildHashEntries(Object.fromEntries(entries));
+      const serializedEntries = Object.fromEntries(
+        Object.entries(mergedEntries).map(([key, value]) => [key, JSON.stringify(value)])
+      );
+
       const ops = this.createRedisPipeline(client);
-      ops.hSet(this.buildSemanticMemoryKey(userId), ...flatValues);
-      ops.expire(this.buildSemanticMemoryKey(userId), PROMOTION_QUEUE_TTL_SECONDS);
+      for (const staleKey of staleRedisFields) {
+        if (staleKey) {
+          ops.hDel(semanticKey, staleKey);
+        }
+      }
+      if (Object.keys(serializedEntries).length) {
+        ops.hSet(semanticKey, serializedEntries);
+      }
+      ops.expire(semanticKey, PROMOTION_QUEUE_TTL_SECONDS);
       await this.executeRedisPipeline(ops, { userId });
 
-      return entries.length;
+      if (canonicalChangedKeys.size) {
+        await client.incr(this.buildSemanticMemoryRevisionKey(userId));
+      }
+
+      return insertedKeys.size || Object.keys(mergedEntries).length;
+      } finally {
+        await releaseSemanticWriteLock(client, semanticLock);
+      }
     } catch (error) {
       logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return 0;
+    }
+  }
+
+  static async cleanupRejectedSemanticMemories(userId = null) {
+    try {
+      const client = await redisService.getRedisClient();
+      if (!client) {
+        throw new RedisConnectionError('Redis client not initialized');
+      }
+
+      const keys = userId ? [this.buildSemanticMemoryKey(userId)] : [];
+      if (!keys.length) {
+        const iterator = client.scanIterator ? client.scanIterator({ MATCH: 'memory:longterm:semantic:*', COUNT: 200 }) : null;
+        for await (const key of iterator || []) {
+          keys.push(key);
+        }
+      }
+
+      let inspected = 0;
+      let removed = 0;
+      const now = Date.now();
+      const retentionMs = this.getRejectedMemoryRetentionSeconds() * 1000;
+
+      for (const semanticKey of keys) {
+        if (typeof client.type === 'function' && (await client.type(semanticKey)) !== 'hash') {
+          continue;
+        }
+        const raw = await client.hGetAll(semanticKey);
+        for (const [hashKey, rawValue] of Object.entries(raw || {})) {
+          inspected += 1;
+          try {
+            const entry = JSON.parse(rawValue);
+            if (!entry || typeof entry !== 'object') continue;
+            if (this.normalizeStatus(entry.status || 'active') !== 'rejected') continue;
+            const rejectedAt = entry.rejectedAt ? new Date(entry.rejectedAt).getTime() : null;
+            if (!Number.isFinite(rejectedAt)) continue;
+            if (now - rejectedAt >= retentionMs) {
+              await client.hDel(semanticKey, hashKey);
+              removed += 1;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      logger.log('REJECTED_MEMORY_CLEANUP_SUMMARY', {
+        inspected,
+        removed,
+        retentionSeconds: this.getRejectedMemoryRetentionSeconds(),
+        userId: userId || 'all',
+      });
+      return { inspected, removed };
+    } catch (err) {
+      logger.logError('REJECTED_MEMORY_CLEANUP_ERROR', err.message || String(err), err.stack || null, userId || '', 'cleanupRejectedSemanticMemories');
+      return { inspected: 0, removed: 0, error: err.message || String(err) };
+    }
+  }
+
+  static startRejectedMemoryCleanupScheduler() {
+    if (rejectedMemoryCleanupTimer) {
+      return rejectedMemoryCleanupTimer;
+    }
+
+    rejectedMemoryCleanupTimer = setInterval(() => {
+      this.cleanupRejectedSemanticMemories().catch((err) => {
+        logger.logError('REJECTED_MEMORY_CLEANUP_INTERVAL_ERROR', err.message || String(err), err.stack || null, '', 'scheduler');
+      });
+    }, this.getRejectedMemoryCleanupIntervalMs());
+
+    return rejectedMemoryCleanupTimer;
+  }
+
+  static stopRejectedMemoryCleanupScheduler() {
+    if (rejectedMemoryCleanupTimer) {
+      clearInterval(rejectedMemoryCleanupTimer);
+      rejectedMemoryCleanupTimer = null;
     }
   }
 
@@ -1083,22 +1484,195 @@ class WorkingMemoryRedis {
       }
 
       const raw = await client.hGetAll(this.buildSemanticMemoryKey(userId));
-      const grouped = {};
+      const currentByLogicalKey = new Map();
       for (const value of Object.values(raw || {})) {
         try {
           const item = JSON.parse(value);
-          const category = item.category || 'facts';
-          if (!grouped[category]) grouped[category] = [];
-          grouped[category].push(item);
+          if (!item || typeof item !== 'object') continue;
+          item.status = this.normalizeStatus(item.status || 'active');
+          if (!this.isCurrentCanonicalMemory(item)) continue;
+          const logicalKey = this.getLogicalMemoryKey(item);
+          item.logicalKey = logicalKey;
+          if (logicalKey === 'identity:name') {
+            item.key = 'name';
+            item.attribute = 'name';
+          }
+          const current = currentByLogicalKey.get(logicalKey);
+          if (this.isPreferredActiveMemory(item, current)) {
+            currentByLogicalKey.set(logicalKey, item);
+          }
         } catch {
           // ignore malformed semantic entries
         }
+      }
+
+      const grouped = {};
+      for (const item of currentByLogicalKey.values()) {
+        const category = item.category || 'facts';
+        if (!grouped[category]) grouped[category] = [];
+        grouped[category].push(item);
+      }
+
+      for (const category of Object.keys(grouped)) {
+        grouped[category].sort((a, b) => {
+          const aUpdatedAt = Date.parse(a.updatedAt || a.createdAt || '') || 0;
+          const bUpdatedAt = Date.parse(b.updatedAt || b.createdAt || '') || 0;
+          return bUpdatedAt - aUpdatedAt;
+        });
       }
 
       return grouped;
     } catch (error) {
       logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return {};
+    }
+  }
+
+  static async deleteSemanticMemories(userId, criteria = []) {
+    if (!userId) return 0;
+
+    try {
+      const client = await redisService.getRedisClient();
+      if (!client) {
+        throw new RedisConnectionError('Redis client not initialized');
+      }
+
+      const semanticKey = this.buildSemanticMemoryKey(userId);
+      const raw = await client.hGetAll(semanticKey);
+      if (!raw || !Object.keys(raw).length) {
+        return 0;
+      }
+
+      const filters = Array.isArray(criteria) ? criteria : [criteria];
+      let deleted = 0;
+
+      for (const [hashKey, rawValue] of Object.entries(raw)) {
+        try {
+          const item = JSON.parse(rawValue);
+          if (!item || typeof item !== 'object') continue;
+          if (this.normalizeStatus(item.status || 'active') !== 'active') continue;
+
+          let shouldDelete = false;
+          for (const filter of filters) {
+            if (!filter) continue;
+
+            if (typeof filter === 'function') {
+              if (filter(item)) {
+                shouldDelete = true;
+                break;
+              }
+              continue;
+            }
+
+            if (typeof filter === 'string') {
+              const token = String(filter).trim().toLowerCase();
+              if (!token) continue;
+              const targetCategory = String(item.category || '').toLowerCase();
+              const targetAttribute = String(item.attribute || item.key || '').toLowerCase();
+              const targetValue = String(item.value || '').toLowerCase();
+              if (targetCategory === token || targetAttribute === token || targetValue.includes(token)) {
+                shouldDelete = true;
+                break;
+              }
+              continue;
+            }
+
+            if (filter && typeof filter === 'object') {
+              const categoryMatch = filter.category && String(item.category || '').toLowerCase() === String(filter.category).toLowerCase();
+              const attributeMatch = filter.attribute && String(item.attribute || item.key || '').toLowerCase() === String(filter.attribute).toLowerCase();
+              const valueMatch = filter.value && (
+                String(item.value || '').toLowerCase().includes(String(filter.value).toLowerCase()) ||
+                String(filter.value).toLowerCase().includes(String(item.value || '').toLowerCase())
+              );
+              if (categoryMatch || attributeMatch || valueMatch) {
+                shouldDelete = true;
+                break;
+              }
+            }
+          }
+
+          if (!shouldDelete) continue;
+
+          const deletedAt = new Date().toISOString();
+          const updated = {
+            ...item,
+            memoryId: item.memoryId || item.id || hashKey,
+            status: 'deleted',
+            deletedAt,
+            updatedAt: deletedAt,
+          };
+          await client.hSet(semanticKey, hashKey, JSON.stringify(updated));
+          deleted += 1;
+        } catch {
+          continue;
+        }
+      }
+
+      if (deleted > 0) {
+        await client.incr(this.buildSemanticMemoryRevisionKey(userId));
+      }
+
+      return deleted;
+    } catch (error) {
+      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
+      return 0;
+    }
+  }
+
+  static async getMemoryLineage(userId, memoryId) {
+    if (!userId || !memoryId) return null;
+
+    try {
+      const client = await redisService.getRedisClient();
+      if (!client) throw new RedisConnectionError('Redis client not initialized');
+
+      const raw = await client.hGetAll(this.buildSemanticMemoryKey(userId));
+      const records = Object.entries(raw || {}).flatMap(([hashKey, value]) => {
+        try {
+          const item = JSON.parse(value);
+          if (!item || typeof item !== 'object') return [];
+          return [{ ...item, memoryId: item.memoryId || item.id || hashKey, _hashKey: hashKey }];
+        } catch {
+          return [];
+        }
+      });
+      const target = records.find((item) => item.memoryId === String(memoryId) || item.id === String(memoryId));
+      if (!target) return null;
+
+      const related = new Map([[target._hashKey, target]]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const item of records) {
+          const pointsToRelated = [item.parentMemoryId, item.supersedesMemoryId, item.supersededBy, item.replacedBy]
+            .filter(Boolean)
+            .some((id) => relatedHasMemoryId(related, id));
+          const relatedPointsToItem = Array.from(related.values()).some((parent) =>
+            [parent.parentMemoryId, parent.supersedesMemoryId, parent.supersededBy, parent.replacedBy]
+              .filter(Boolean)
+              .includes(item.memoryId)
+          );
+          if ((pointsToRelated || relatedPointsToItem) && !related.has(item._hashKey)) {
+            related.set(item._hashKey, item);
+            changed = true;
+          }
+        }
+      }
+
+      const chain = Array.from(related.values()).sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+      const active = chain
+        .filter((item) => this.normalizeStatus(item.status || 'active') === 'active')
+        .reduce((preferred, item) => this.isPreferredActiveMemory(item, preferred) ? item : preferred, null);
+      return {
+        userId: String(userId),
+        memoryId: target.memoryId,
+        logicalKey: target.logicalKey || this.getLogicalMemoryKey(target),
+        activeMemoryId: active ? active.memoryId : null,
+        records: chain.map(({ _hashKey, ...item }) => item),
+      };
+    } catch (error) {
+      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, String(memoryId));
+      return null;
     }
   }
 

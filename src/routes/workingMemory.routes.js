@@ -1,6 +1,6 @@
 /**
  * Working Memory Routes
- * 
+ *
  * Base path: /api/working-memory
  */
 
@@ -26,6 +26,9 @@ router.use((req, res, next) => {
       if (req.path === '/health') {
         return res.status(200).json({ healthy: false, ok: false, enabled: false, reason: 'memory_disabled_for_live_stability' });
       }
+      if (req.path === '/wipe') {
+        return next();
+      }
       return memoryDisabledResponse(res);
     }
   }
@@ -45,7 +48,7 @@ router.use(WorkingMemoryMiddleware.bindAuthenticatedUser);
 /**
  * POST /api/working-memory/save
  * Save a complete conversation turn
- * 
+ *
  * Body:
  * {
  *   userId: string (required),
@@ -54,7 +57,7 @@ router.use(WorkingMemoryMiddleware.bindAuthenticatedUser);
  *   aiResponse: string (required, COMPLETE response),
  *   ttl: number (optional, default 3600)
  * }
- * 
+ *
  * Response:
  * {
  *   success: boolean,
@@ -191,6 +194,37 @@ router.get(
   '/debug',
   WorkingMemoryMiddleware.validateQueryRequest,
   WorkingMemoryController.getDebugInfo
+);
+
+/**
+ * DELETE /api/working-memory/wipe
+ * Full user memory wipe across all stores
+ *
+ * Requires authentication. JWT userId is authoritative.
+ *
+ * Body:
+ * {
+ *   reason: "user_request" | "admin_command" (optional)
+ * }
+ *
+ * Response:
+ * {
+ *   success: boolean,
+ *   timestamp: ISO8601,
+ *   userId: string,
+ *   reason: string,
+ *   browserWipeRequired: boolean,
+ *   results: {
+ *     redisWorking: { deleted: boolean, count: number, error?: string },
+ *     redisSemantic: { deleted: boolean, fields: number, error?: string },
+ *     redisRelationships: { deleted: boolean, count: number, error?: string },
+ *     ... (per-store details)
+ *   }
+ * }
+ */
+router.delete(
+  '/wipe',
+  WorkingMemoryController.wipeUserMemory
 );
 
 // Error handler

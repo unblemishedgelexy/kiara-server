@@ -48,9 +48,9 @@ const defaultClientOrigins = [
 const nodeEnv = readEnv('NODE_ENV', 'development');
 
 const env = {
-  clientOrigins: mergeLists(
-    defaultClientOrigins,
-    readList('CLIENT_ORIGIN', [])
+  allowedOrigins: mergeLists(
+    readList('ALLOWED_ORIGINS', []),
+    readList('CLIENT_ORIGIN', defaultClientOrigins)
   ),
   elevenLabsApiKey: readEnv('ELEVENLABS_API_KEY'),
   elevenLabsVoiceId: readEnv('ELEVENLABS_VOICE_ID'),
@@ -107,7 +107,7 @@ const env = {
   shortTermMemoryCharBudget: readNumber('SHORT_TERM_MEMORY_CHAR_BUDGET', 4000),
   pineconeApiKey: readEnv('PINECONE_API_KEY', ''),
   pineconeIndexName: readEnv('PINECONE_INDEX_NAME', 'kiara-long-term-memory'),
-  pineconeVectorDimension: readNumber('PINECONE_VECTOR_DIMENSION', 1536),
+  pineconeVectorDimension: readNumber('PINECONE_VECTOR_DIMENSION', 3072),
   pineconeEnvironment: readEnv('PINECONE_ENVIRONMENT', ''),
   pineconeCloud: readEnv('PINECONE_CLOUD', ''),
   pineconeRegion: readEnv('PINECONE_REGION', ''),
@@ -166,7 +166,7 @@ function isNativeAppOrigin(origin) {
 function isAllowedCorsOrigin(origin) {
   if (!origin || origin === 'null') return true;
   const normalizedOrigin = origin.trim().replace(/\/$/, '');
-  return env.clientOrigins.includes(normalizedOrigin) || isNativeAppOrigin(normalizedOrigin);
+  return env.allowedOrigins.includes(normalizedOrigin) || isNativeAppOrigin(normalizedOrigin);
 }
 
 module.exports = { env, isProductionEnv, isAllowedCorsOrigin, isNativeAppOrigin, isAllowedOAuthReturnUrl };

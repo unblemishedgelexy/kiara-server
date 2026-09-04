@@ -154,6 +154,9 @@ function extractMemoryCandidates(rawText, context = {}) {
     }
 
     const evidence = computeEvidence(normalized);
+    if (sourceRole === 'assistant') {
+      evidence.userAsserted = false;
+    }
     const category = classifyCandidate(segment, text);
     const candidate = {
       candidateId: `cand-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -267,15 +270,71 @@ function extractIdentityName(text) {
   return null;
 }
 
+function normalizeAttributeToken(token) {
+  return String(token || '').trim().toLowerCase().replace(/[^a-z0-9\u0900-\u097F]+/g, '_').replace(/^_+|_+$/g, '') || 'memory';
+}
+
+function deriveLogicalAttribute(category, rawText) {
+  const text = normalizeText(rawText || '');
+  if (!text) return category;
+
+  if (category === 'identity') return 'name';
+  if (category === 'goal') return 'goal';
+  if (category === 'fact' && /\b(?:favorite|favourite|pasand)\s+(?:ka|ki|ke)?\s*(?:book|food|drink|movie|song|music)\b/i.test(text)) {
+    return 'favorite_item';
+  }
+  if (category === 'preference') {
+    const preferenceAttributePatterns = [
+      'color', 'rang', 'colour', 'food', 'khana', 'dish', 'book', 'kitab', 'movie', 'film', 'song',
+      'music', 'drink', 'place', 'city', 'language', 'sport', 'game', 'hobby', 'artist', 'author', 'topic'
+    ];
+
+    const match = text.match(new RegExp(`(?:${preferenceAttributePatterns.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'i'));
+    if (match && match[0]) return `favorite_${normalizeAttributeToken(match[0])}`;
+
+    return 'favorite';
+  }
+  if (category === 'skill') return 'skill';
+  if (category === 'project') return 'project';
+  if (category === 'relationship') return 'relationship';
+  return category;
+}
+
 function extractCanonicalValue(rawText, category) {
   const text = normalizeText(rawText || '');
   if (!text) return null;
+
+  if (category === 'fact') {
+    const factDelimiterMatch = text.match(/^(?:.*?)(?:\bis\b|\:|=)\s*["']?(.+?)["']?\s*$/i);
+    if (factDelimiterMatch && factDelimiterMatch[1]) {
+      const factValue = factDelimiterMatch[1].trim().replace(/["']+$/g, '').trim();
+      if (factValue) return factValue;
+    }
+  }
 
   if (category === 'identity' || /(?:naam|name)/i.test(text)) {
     const directIdentityName = extractIdentityName(text);
     if (directIdentityName) {
       return directIdentityName;
     }
+  }
+
+  let candidate = text
+    .replace(/^(?:ab\s+)?(?:mujhe|muje|main|mera|meri|mere|my|i\s+am|i'm)\s+/i, '')
+    .replace(/^(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+(?:naam|name|goal|target|objective|plan|favorite|favourite|preference)\s+/i, '')
+    .replace(/\s+(?:pasand|preference|preferred|like|love|chahiye|karna|banana|banna|lena|seekhna|hai|hain|hoon|hun|hoga|hogi|is|are|was|were|be)\b.*$/i, '')
+    .trim();
+
+  if (category === 'fact' && !candidate) {
+    candidate = text.replace(/^.*?(?:is|:|=)\s*/i, '').trim();
+  }
+
+  if (category === 'goal' && !candidate) {
+    candidate = text.replace(/^(?:mera|meri|mere|main|my|goal|target|objective|plan)\s+/i, '').trim();
+  }
+
+  if (candidate && candidate !== text) {
+    return candidate;
   }
 
   if (category === 'preference' || category === 'project' || category === 'goal' || category === 'relationship' || category === 'skill' || category === 'fact') {
@@ -286,10 +345,23 @@ function extractCanonicalValue(rawText, category) {
 }
 
 function extractCanonicalSemanticMemories(rawText, context = {}) {
+  if (context.sourceRole && context.sourceRole !== 'user') {
+    return {};
+  }
   const candidates = extractMemoryCandidates(rawText, context);
   const grouped = {};
 
   for (const candidate of candidates) {
+    if (Number(candidate.preliminaryConfidence || 0) < 0.55) {
+      traceLog('canonical_candidate_rejected', {
+        memoryTraceId: context.memoryTraceId || null,
+        source: candidate.source || 'unknown',
+        category: candidate.category,
+        reason: 'memory_worthiness_below_threshold',
+        memoryWorthy: false,
+      });
+      continue;
+    }
     let category = String(candidate.category || 'fact');
     const candidateText = normalizeText(candidate.value || '');
     const explicitNameMatch = /(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+naam\s+([A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F\s'’.-]{1,40}?)(?=\s+(?:hai|hain|hoon|hun|\.|,|$))/i.exec(candidateText);
@@ -306,15 +378,20 @@ function extractCanonicalSemanticMemories(rawText, context = {}) {
       continue;
     }
 
-    const key = category === 'identity' ? 'name' : category;
+    const attribute = deriveLogicalAttribute(category, candidateText);
+    const key = category === 'identity' ? 'name' : attribute;
     const fact = {
       id: `semantic:${category}:${String(key).toLowerCase()}:${String(canonicalValue).toLowerCase().replace(/[^a-z0-9\u0900-\u097F]+/g, '_').slice(0, 64)}`,
       category,
       key,
+      attribute: key,
       label: category === 'identity' ? 'Name' : category,
       value: canonicalValue,
-      source: candidate.source || 'unknown',  // Track source: user or assistant
-      confidenceScore: category === 'identity' && candidate.source === 'user' ? 0.95 : Number(candidate.preliminaryConfidence || 0.75),  // HIGH confidence for user-stated identity
+      source: candidate.source || 'unknown',
+      userOwned: candidate.source === 'user',
+      memoryWorthy: Number(candidate.preliminaryConfidence || 0) >= 0.55,
+      status: 'active',
+      confidenceScore: category === 'identity' && candidate.source === 'user' ? 0.95 : Number(candidate.preliminaryConfidence || 0.75),
       importance: (category === 'identity' && candidate.source === 'user' ? 0.95 : Number(candidate.preliminaryConfidence || 0.75)) * 0.9 + 0.1,
       reason: category === 'identity' ? `Explicit user identity fact directly stated in transcript (source: ${candidate.source}).` : 'Explicit statement preserved in semantic memory.',
       source_turn_ids: context.sourceTurnId ? [context.sourceTurnId] : [],

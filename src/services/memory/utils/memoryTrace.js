@@ -47,8 +47,10 @@ function redactSecrets(value, seen = new WeakSet()) {
 
 function normalizeTracePayload(stage, payload = {}, memoryTraceId = null) {
   const output = { ...payload };
+  output.traceId = output.traceId || output.memoryTraceId || memoryTraceId || null;
   if (!output.stage) output.stage = stage;
-  if (!output.memoryTraceId) output.memoryTraceId = memoryTraceId || createMemoryTraceId();
+  if (!output.memoryTraceId) output.memoryTraceId = output.traceId || createMemoryTraceId();
+  if (!output.traceId) output.traceId = output.memoryTraceId;
   output.timestamp = output.timestamp || new Date().toISOString();
   return redactSecrets(output);
 }

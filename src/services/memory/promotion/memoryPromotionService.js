@@ -6,6 +6,7 @@ const pineconeService = require('../../pineconeService');
 const { analyzeConversation, buildEpisode } = require('./memoryAnalyzer');
 const { computeEmbedding } = require('../../../utils/memory/memoryUtils');
 const logger = require('../utils/memoryLogger');
+const { isWipeInProgress } = require('../deletion/userMemoryWipeService');
 
 const PROMOTION_VERSION = '1';
 const MIN_PROMOTION_INTERVAL_MS = 15 * 60 * 1000;
@@ -63,6 +64,10 @@ async function promoteUserMemory(userId) {
     throw new Error('Missing userId for memory promotion');
   }
 
+  if (await isWipeInProgress(userId)) {
+    return { success: true, promoted: false, reason: 'user_wipe_in_progress' };
+  }
+
   const promotionStartedAt = Date.now();
   logger.promotionStart({ userId, status: 'starting', startTime: promotionStartedAt });
   const promotionState = await WorkingMemoryRedis.getPromotionState(userId);
@@ -86,6 +91,10 @@ async function promoteUserMemory(userId) {
   const promotableTurns = promotionWindowTurns(turns, lastPromotion);
   if (!promotableTurns.length) {
     return { success: true, promoted: false, reason: 'no_new_turns' };
+  }
+
+  if (await isWipeInProgress(userId)) {
+    return { success: true, promoted: false, reason: 'user_wipe_in_progress' };
   }
 
   const rawConversationSize = characterCount(JSON.stringify(promotableTurns));
@@ -113,9 +122,15 @@ async function promoteUserMemory(userId) {
   }
 
   const semanticStartedAt = Date.now();
+  if (await isWipeInProgress(userId)) {
+    return { success: true, promoted: false, reason: 'user_wipe_in_progress' };
+  }
   const semanticMemoriesUpdated = await WorkingMemoryRedis.upsertSemanticMemories(userId, analysis.semanticMemories);
   const semanticDurationMs = Date.now() - semanticStartedAt;
 
+  if (await isWipeInProgress(userId)) {
+    return { success: true, promoted: false, reason: 'user_wipe_in_progress' };
+  }
   await pineconeService.ensureIndex();
 
   if (!episodeMemory.embeddingText || !episodeMemory.id) {
@@ -148,6 +163,10 @@ async function promoteUserMemory(userId) {
 
   if (!pineconeOk) {
     throw new Error('Pinecone upsert failed for episode promotion');
+  }
+
+  if (await isWipeInProgress(userId)) {
+    return { success: true, promoted: false, reason: 'user_wipe_in_progress' };
   }
 
   // Initialize memory stats (importance/confidence) and temporal markers

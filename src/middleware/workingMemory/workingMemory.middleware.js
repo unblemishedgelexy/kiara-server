@@ -12,6 +12,7 @@ const {
   MissingSessionError,
   EmptyMessageError,
 } = require('../../utils/workingMemory/errors');
+const { log: traceLog } = require('../../services/memory/utils/memoryTrace');
 
 class WorkingMemoryMiddleware {
   static _generateId(prefix = 's') {
@@ -21,6 +22,15 @@ class WorkingMemoryMiddleware {
   static bindAuthenticatedUser(req, res, next) {
     console.info('[ENTERED] WorkingMemoryMiddleware.bindAuthenticatedUser', { timestamp: new Date().toISOString() });
     const authenticatedUserId = req.userId ? String(req.userId).trim() : '';
+    traceLog('identity_validation', {
+      traceId: req.memoryTraceId,
+      requestId: req.requestId,
+      userId: authenticatedUserId || null,
+      suppliedUserIdExists: Boolean(req.body?.userId || req.query?.userId || req.params?.userId),
+      accepted: Boolean(authenticatedUserId),
+      endpoint: req.originalUrl,
+      operation: 'working_memory_request',
+    });
 
     if (!authenticatedUserId) {
       console.info('[OUTPUT] WorkingMemoryMiddleware.bindAuthenticatedUser', { result: 'no-auth' });
@@ -92,6 +102,18 @@ class WorkingMemoryMiddleware {
       ({ userId, sessionId, userMessage, aiResponse } = req.body);
 
       console.info('[INPUT] WorkingMemoryMiddleware.validateSaveRequest', { userId, sessionId, userMessageLength: userMessage?.length, aiResponseLength: aiResponse?.length });
+      traceLog('incoming_memory_payload', {
+        traceId: req.memoryTraceId,
+        requestId: req.requestId,
+        userId,
+        sessionId,
+        operation: 'save_turn',
+        memoryCount: userMessage ? 1 : 0,
+        categories: ['conversation'],
+        logicalKeys: [],
+        userMessageLength: String(userMessage || '').length,
+        aiResponseLength: String(aiResponse || '').length,
+      });
 
       // Validate userId
       if (!userId || typeof userId !== 'string' || userId.trim().length === 0) {

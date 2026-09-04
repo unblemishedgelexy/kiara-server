@@ -54,14 +54,16 @@ module.exports = {
         userQuery: String(userQuery).slice(0, 180),
         sessionId,
       });
+      const memoryTraceId = options.memoryTraceId || createMemoryTraceId();
       const result = await MemoryService.prepareContext(userId, {
         charLimit,
         userQuery,
         sessionId,
         activeContext,
+        memoryTraceId,
       });
       traceLog('memory_composer', {
-        memoryTraceId: createMemoryTraceId(),
+        memoryTraceId,
         workingMemory: [],
         episodicMemory: [],
         semanticMemory: [],
@@ -69,6 +71,8 @@ module.exports = {
         discardedMemories: [],
         selectionReasons: ['live_context_injection'],
         finalMemoryContext: String(result.systemPrompt || ''),
+        memoryRevision: result.memoryRevision || 0,
+        contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
       });
 
       logger.log('STM_INJECT', { userId, trigger, sessionId, systemPromptLength: String(result.systemPrompt || '').length, estimatedTokens: Math.ceil(String(result.systemPrompt || '').length / 4), ts: new Date().toISOString() });
@@ -101,7 +105,11 @@ module.exports = {
         ? `${result.systemPrompt}\n\n${RESPONSE_GUIDELINES}`
         : RESPONSE_GUIDELINES;
 
-      return { systemPrompt: augmented };
+      return {
+        systemPrompt: augmented,
+        memoryRevision: result.memoryRevision || 0,
+        contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
+      };
 
     } catch (err) {
       console.error('[ERROR]', 'System prompt builder failed:', err && err.message ? err.message : err);

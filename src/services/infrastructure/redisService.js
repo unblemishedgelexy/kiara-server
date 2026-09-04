@@ -11,21 +11,31 @@ function logRedis(level, ...args) {
 }
 
 let redisClient = null;
+let redisInitPromise = null;
 
 async function initRedis() {
   if (redisClient) {
     return redisClient;
   }
+  if (redisInitPromise) {
+    return redisInitPromise;
+  }
 
+  redisInitPromise = initRedisInternal();
+  try {
+    return await redisInitPromise;
+  } finally {
+    redisInitPromise = null;
+  }
+}
+
+async function initRedisInternal() {
   async function connectClient(options, description) {
     const client = redis.createClient({
       ...options,
       socket: {
         ...(options.socket || {}),
         reconnectStrategy: (retries) => {
-          if (retries >= 10) {
-            return new Error('Redis reconnection attempts exhausted');
-          }
           return Math.min(200 + retries * 200, 2000);
         },
       },
@@ -97,13 +107,22 @@ async function getRedisClient() {
   if (!redisClient) {
     await initRedis();
   }
+  if (!redisClient || !redisClient.isReady) {
+    const error = new Error('Redis is unavailable');
+    error.code = 'REDIS_UNAVAILABLE';
+    throw error;
+  }
   return redisClient;
 }
 
 // Close Redis connection
 async function closeRedis() {
   if (redisClient) {
-    await redisClient.quit();
+    try {
+      await redisClient.quit();
+    } catch (error) {
+      logRedis('warn', '[REDIS_CLOSE_ERROR]', error instanceof Error ? error.message : error);
+    }
     redisClient = null;
   }
 }

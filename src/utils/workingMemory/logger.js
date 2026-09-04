@@ -41,6 +41,15 @@ class WorkingMemoryLogger {
   static logContextPreparing() { /* suppressed; prompt builder will print final context */ }
   static logContextBuilt() { /* suppressed to avoid duplicate logs */ }
 
+  static log(tag, payload) {
+    const base = typeof payload === 'string' ? payload : { ...(payload || {}), ts: new Date().toISOString() };
+    if (typeof payload === 'string') {
+      console.log(`[${tag}]`, base);
+      return;
+    }
+    console.log(`[${tag}]`, JSON.stringify(base));
+  }
+
   static logFilter(filterName, inputCount, outputCount, durationMs, removedItems, reason) {
     return;
   }

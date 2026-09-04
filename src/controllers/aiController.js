@@ -10,6 +10,7 @@ async function generateTextController(req, res, next) {
       candidateCount,
       maxOutputTokens,
       userId: req.userId || null,
+      memoryTraceId: req.memoryTraceId || null,
       sessionId: req.sessionID || null,
     });
     res.json({ success: true, data: { text: result.text, raw: result.raw } });

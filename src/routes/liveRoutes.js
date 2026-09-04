@@ -2,12 +2,13 @@ const express = require('express');
 const { createLiveEphemeralToken } = require('../services/../services/live/liveTokenService');
 const { env } = require('../config/env');
 const authMiddleware = require('../middleware/authMiddleware');
+const { log: traceLog } = require('../services/memory/utils/memoryTrace');
 
 const router = express.Router();
 const geminiHealth = require('../services/../services/live/geminiHealth');
 
 router.get('/health', async (_req, res) => {
-  const health = geminiHealth.getStatus();
+  const health = await geminiHealth.checkOnce();
   res.json({
     elevenLabsConfigured: Boolean(env.elevenLabsApiKey && env.elevenLabsVoiceId),
     geminiConfigured: Boolean(env.geminiApiKey),
@@ -38,6 +39,8 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
   const userQuery = typeof requestBody.userQuery === 'string' ? requestBody.userQuery : '';
   const sessionId = typeof requestBody.sessionId === 'string' ? requestBody.sessionId : userId || 'anonymous';
   const activeContext = requestBody.activeContext && typeof requestBody.activeContext === 'object' ? requestBody.activeContext : {};
+  const memoryTraceId = req.memoryTraceId;
+  traceLog('llm_endpoint_received', { traceId: memoryTraceId, requestId: req.requestId, userId: userId || 'anonymous', endpoint: '/api/live/token', method: req.method, operation: 'live_token' });
 
   console.info('[LIVE_TOKEN_ROUTE]', {
     userId: userId || 'anonymous',
@@ -49,7 +52,7 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
   });
 
   try {
-    const token = await createLiveEphemeralToken(userId, { userQuery, sessionId, activeContext });
+    const token = await createLiveEphemeralToken(userId, { userQuery, sessionId, activeContext, memoryTraceId, lifecycleTrigger: req.lifecycleTrigger || 'LIVE_SESSION_START' });
 
     if (!token || typeof token.token !== 'string' || !token.token.trim()) {
       console.error('[ERROR]', 'Live token generation returned invalid token data.');
@@ -71,6 +74,7 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
       responseModalities: token.sessionConfig?.responseModalities || 'unknown',
       timestamp: new Date().toISOString(),
     });
+    traceLog('final_response_returned', { traceId: memoryTraceId, userId: userId || 'anonymous', operation: 'live_token', status: 200, memoryRetrievalStatus: 'included_in_prompt_builder', totalPipelineDurationMs: Date.now() - requestStartedAt });
     res.status(200).json(payload);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

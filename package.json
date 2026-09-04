@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test:memory": "node scripts/test_memory.js",
+    "test:memory": "node test-memory-e2e.js",
     "certify:gemini-session": "node scripts/run-gemini-session-certification.js",
     "certify:gemini-reality": "node scripts/run-gemini-reality-certification.js"
   },
