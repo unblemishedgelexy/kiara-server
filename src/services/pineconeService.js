@@ -5,7 +5,6 @@ try {
   PineconePkg = null;
 }
 const { env } = require('../config/env');
-const logger = require('./memory/utils/memoryLogger');
 
 let pineconeClient = null;
 let pineconeIndex = null;
@@ -88,13 +87,10 @@ async function ensureIndex() {
           },
         },
       });
-      logger.pineconeVerify({ status: 'index_created', indexName: env.pineconeIndexName });
     } else {
-      logger.pineconeVerify({ status: 'index_exists', indexName: env.pineconeIndexName });
     }
   } catch (error) {
     console.warn('Unable to ensure Pinecone index exists:', error);
-    logger.pineconeVerify({ status: 'index_ensure_failed', error: error.message || String(error) });
     throw error;
   }
 }
@@ -139,11 +135,9 @@ async function upsertLongTermVector({ id, vector, metadata, namespace }) {
     await index.upsert(payload);
 
     const verification = await verifyPineconeUpsert(index, id, namespace, metadata);
-    logger.pineconeUpsert({ id, namespace, success: true, verification: verification.status, ...verification.meta });
     return true;
   } catch (err) {
     pineconeUnavailable = true;
-    logger.pineconeUpsert({ id, namespace, success: false, error: err.message || String(err) });
     console.warn('[PINECONE_SKIPPED] upsert failed:', err && err.message ? err.message : err);
     return false;
   }
@@ -186,7 +180,6 @@ async function deleteLongTermVectorsByMetadata(filter, namespace) {
     return { deleted: true, count: 0, filter, namespace: namespace || null };
   } catch (err) {
     pineconeUnavailable = true;
-    logger.pineconeVerify({ status: 'filtered_delete_failed', error: err.message || String(err) });
     return { deleted: false, count: 0, error: err.message || String(err) };
   }
 }
@@ -212,7 +205,6 @@ async function queryLongTermVectors({ vector, topK = 10, filter = {}, namespace 
     return results.matches || [];
   } catch (err) {
     pineconeUnavailable = true;
-    logger.pineconeVerify({ status: 'query_failed', error: err.message || String(err) });
     console.warn('[PINECONE_SKIPPED] query failed:', err && err.message ? err.message : err);
     return [];
   }
@@ -276,7 +268,6 @@ async function fetchLongTermByIds(ids = [], namespace) {
     return fetched.vectors || {};
   } catch (err) {
     pineconeUnavailable = true;
-    logger.pineconeVerify({ status: 'fetch_failed', error: err.message || String(err) });
     console.warn('[PINECONE_SKIPPED] fetch failed:', err && err.message ? err.message : err);
     return {};
   }

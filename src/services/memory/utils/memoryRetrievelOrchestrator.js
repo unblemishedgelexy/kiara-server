@@ -27,8 +27,6 @@ const deduplication = require('./deduplicationService');
 const relevanceRanking = require('./relevanceRanking');
 const contextBudget = require('./contextBudget');
 const antiRepetition = require('./antiRepetitionTracker');
-const logger = require('./memoryLogger');
-const { log: traceLog } = require('./memoryTrace');
 const { env } = require('../../../config/env');
 
 function normalizeMemoryToken(value) {
@@ -120,15 +118,8 @@ async function searchShortTermMemory(userId, sessionId, query, timeoutMs = SHORT
     ]);
     
     const durationMs = Date.now() - startAt;
-    logger.log('STM_SEARCH', { userId, found: Array.isArray(result) ? result.length : 0, durationMs });
-    
     return Array.isArray(result) ? result : [];
   } catch (err) {
-    if (err.message === 'STM_TIMEOUT') {
-      logger.log('STM_SEARCH_TIMEOUT', { userId, timeoutMs });
-    } else {
-      logger.logError('STM_SEARCH_ERROR', err, { userId });
-    }
     return [];
   }
 }
@@ -161,15 +152,8 @@ async function searchLongTermMemory(userId, query, timeoutMs = LONG_TERM_TIMEOUT
     ]);
     
     const durationMs = Date.now() - startAt;
-    logger.log('LTM_SEARCH', { userId, found: Array.isArray(result) ? result.length : 0, durationMs });
-    
     return Array.isArray(result) ? result : [];
   } catch (err) {
-    if (err.message === 'LTM_TIMEOUT') {
-      logger.log('LTM_SEARCH_TIMEOUT', { userId, timeoutMs });
-    } else {
-      logger.logError('LTM_SEARCH_ERROR', err, { userId });
-    }
     return [];
   }
 }
@@ -193,18 +177,8 @@ async function retrieveMemoryForQuery(query, sessionContext = {}) {
   const sessionId = sessionContext.sessionId || userId;
   const activeContext = sessionContext.activeContext || {};
   const currentQuestion = String(query || '').trim();
-  const memoryTraceId = sessionContext.memoryTraceId || null;
-
-  logger.log('MEMORY_QUERY', {
-    userId,
-    sessionId,
-    query: currentQuestion.slice(0, 120),
-    activeEntities: Array.isArray(activeContext.activeEntities) ? activeContext.activeEntities : [],
-    lastReferencedEntity: activeContext.lastReferencedEntity || null,
-  });
 
   const analysis = queryAnalyzer.analyzeQuery(query, sessionContext);
-  traceLog('query_analysis_result', { memoryTraceId, userId, sessionId, operation: 'memory_retrieval', detectedIntent: analysis.intent, category: analysis.queryProfile?.category || null, logicalKey: analysis.queryProfile?.attribute ? `${analysis.queryProfile.category || 'memory'}:${analysis.queryProfile.attribute}` : null, ambiguity: Boolean(analysis.ambiguous), fallbackMode: analysis.shouldSearchLongTerm ? 'long_term_if_needed' : 'structured_only' });
   const fallbackReason = 'No reliable memory found';
 
   let memories = [];
@@ -227,13 +201,6 @@ async function retrieveMemoryForQuery(query, sessionContext = {}) {
   if (!isEmptyQuery && analysis.shouldSearchShortTerm && !resolvesCanonicalMemory) {
     shortTermResult = await searchShortTermMemory(userId, sessionId, analysis, 120);
     memories.push(...shortTermResult);
-    logger.log('MEMORY_SHORT_TERM', {
-      userId,
-      sessionId,
-      matched: shortTermResult.length,
-      query: currentQuestion.slice(0, 120),
-      candidates: shortTermResult.slice(0, 5).map((m) => m.id || m.memoryId || m.userMessage || m.summary || '').filter(Boolean),
-    });
   }
 
   try {
@@ -242,7 +209,6 @@ async function retrieveMemoryForQuery(query, sessionContext = {}) {
     let semantic = await WorkingMemoryRedis.getSemanticMemories(userId);
     const semanticRevisionAfter = await WorkingMemoryRedis.getSemanticMemoryRevision(userId);
     if (semanticRevisionBefore !== semanticRevisionAfter) {
-      traceLog('memory_revision_changed_during_retrieval', { memoryTraceId, userId, before: semanticRevisionBefore, after: semanticRevisionAfter, decision: 'reread_current_canonical_memory' });
       semantic = await WorkingMemoryRedis.getSemanticMemories(userId);
     }
       const semanticItems = Object.values(semantic || {}).flat().filter(Boolean);
@@ -250,7 +216,6 @@ async function retrieveMemoryForQuery(query, sessionContext = {}) {
       const matchingSemantic = isEmptyQuery
         ? semanticItems
         : semanticItems.filter((item) => semanticMatchesQuery(item, analysis));
-      traceLog('redis_semantic_lookup', { memoryTraceId, userId, operation: 'semantic_lookup', queriedCategory: analysis.queryProfile?.category || null, queriedLogicalKey: analysis.queryProfile?.attribute || null, candidateCount: semanticItems.length, activeCandidateCount: matchingSemantic.length, excludedCount: semanticItems.length - matchingSemantic.length, retrievalDecision: isEmptyQuery ? 'canonical_active_only' : 'query_filtered', memorySource: 'redis_semantic', statuses: ['active'], canonicalMemorySelected: matchingSemantic.slice(0, 10).map((item) => ({ logicalKey: item.logicalKey || `${item.category}:${item.attribute || item.key || item.category}`, source: item.source || 'unknown', status: item.status || 'active' })) });
       if (matchingSemantic.length) {
         semanticResult = matchingSemantic.map((item) => ({
           id: item.id || `${item.category}:${item.key}:${item.value}`,
@@ -267,31 +232,16 @@ async function retrieveMemoryForQuery(query, sessionContext = {}) {
       }
     }
   } catch (err) {
-    logger.logError('MEMORY_SEMANTIC_RETRIEVAL_ERROR', err, { userId, sessionId });
   }
 
   if (analysis.shouldSearchLongTerm && memories.length === 0 && !resolvesCanonicalMemory) {
-    traceLog('pinecone_fallback', { memoryTraceId, userId, operation: 'pinecone_lookup', triggered: true, reason: 'no_structured_memory_match', namespace: userId, structuredMemoryAlreadyExisted: semanticResult.length > 0 });
     longTermResult = await searchLongTermMemory(userId, query, 300);
     memories.push(...longTermResult);
-    logger.log('MEMORY_LONG_TERM', {
-      userId,
-      sessionId,
-      matched: longTermResult.length,
-      query: currentQuestion.slice(0, 120),
-      candidates: longTermResult.slice(0, 5).map((m) => m.id || m.memoryId || m.metadata?.summary || '').filter(Boolean),
-    });
   }
 
   if (analysis.shouldSearchDeep && memories.length === 0) {
     semanticResult = await searchDeepMemory(userId, query, 250);
     memories.push(...semanticResult);
-    logger.log('MEMORY_SEMANTIC', {
-      userId,
-      sessionId,
-      matched: semanticResult.length,
-      query: currentQuestion.slice(0, 120),
-    });
   }
 
   const deduped = isEmptyQuery
@@ -315,18 +265,6 @@ async function retrieveMemoryForQuery(query, sessionContext = {}) {
   const selected = filtered.slice(0, 5);
   const excluded = ranked.slice(0, 10).filter((item) => !selected.some((selectedItem) => (selectedItem.id || selectedItem.memoryId) === (item.id || item.memoryId))).slice(0, 5);
 
-  logger.log('MEMORY_SELECTED', {
-    userId,
-    sessionId,
-    selected: selected.map((m) => ({ id: m.id || m.memoryId, score: m.relevanceScore || m.score || 0 })),
-  });
-  traceLog('active_candidate_selection', { memoryTraceId, userId, sessionId, operation: 'memory_retrieval', candidatesConsidered: ranked.length, selectedMemoryId: selected[0]?.id || selected[0]?.memoryId || null, selectedLogicalKey: selected[0]?.logicalKey || selected[0]?.key || null, selectionReason: selected.length ? 'ranked_active_candidate' : 'no_candidate', selectedCount: selected.length });
-  traceLog('context_exclusions', { memoryTraceId, userId, sessionId, operation: 'memory_retrieval', excludedCount: excluded.length, reasons: ['superseded_or_rejected_or_low_relevance_or_already_surfaced'] });
-  logger.log('MEMORY_EXCLUDED', {
-    userId,
-    sessionId,
-    excluded: excluded.map((m) => ({ id: m.id || m.memoryId, score: m.relevanceScore || m.score || 0, reason: 'low_relevance_or_already_surfaced' })),
-  });
 
   function formatMemoryText(memory) {
     const category = String(memory.category || memory.type || '').toLowerCase();
@@ -383,30 +321,6 @@ async function retrieveMemoryForQuery(query, sessionContext = {}) {
     reason = topScore > 0.5 ? 'Relevant memory identified' : 'Low-confidence memory selected';
   }
 
-  logger.log('MEMORY_CONTEXT_PACKET', {
-    userId,
-    sessionId,
-    source,
-    confidence,
-    selectedCount: selected.length,
-    contextLength: compressedContext.length,
-    packet: {
-      currentQuestion: currentQuestion.slice(0, 180),
-      entities: analysis.entities,
-      selectedCount: selected.length,
-    },
-  });
-
-  logger.log('MEMORY_CONTEXT_BUILT', {
-    userId,
-    sessionId,
-    source,
-    confidence,
-    memories: selected.length,
-    latencyMs: Date.now() - startAt,
-    intent: analysis.intent,
-  });
-
   return {
     query: currentQuestion,
     intent: analysis.intent,
@@ -427,38 +341,18 @@ async function retrieveMemoryWithEscalation(userId, sessionId, userQuery, option
   const startAt = Date.now();
   const isLiveContext = options.isLiveContext !== false;
   const activeContext = options.activeContext || {};
-  const memoryTraceId = options.memoryTraceId || null;
   const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
   const memoryRevision = await WorkingMemoryRedis.getSemanticMemoryRevision(userId);
 
-  logger.log('MEMORY_RETRIEVAL_START', {
-    userId,
-    sessionId,
-    userQuery: String(userQuery || '').slice(0, 100),
-    isLive: isLiveContext,
-    activeEntities: Array.isArray(activeContext.activeEntities) ? activeContext.activeEntities : [],
-    lastReferencedEntity: activeContext.lastReferencedEntity || null,
-    memoryRevision,
-  });
 
   antiRepetition.initializeSession(userId, sessionId);
 
   const queryAnalysis = queryAnalyzer.analyzeQuery(userQuery, { activeContext });
-  logger.log('QUERY_ANALYZED', {
-    intent: queryAnalysis.intent,
-    entities: queryAnalysis.entities.length,
-    keywords: queryAnalysis.keywords.length,
-    shouldSearchSTM: queryAnalysis.shouldSearchShortTerm,
-    shouldSearchLTM: queryAnalysis.shouldSearchLongTerm,
-    shouldSearchDeep: queryAnalysis.shouldSearchDeep,
-    activeContext: Array.isArray(activeContext.activeEntities) ? activeContext.activeEntities : [],
-  });
 
   const queryResult = await retrieveMemoryForQuery(userQuery, {
     userId,
     sessionId,
     activeContext,
-    memoryTraceId,
   });
 
   const allMemories = Array.isArray(queryResult.memories) ? queryResult.memories : [];
@@ -477,33 +371,9 @@ async function retrieveMemoryWithEscalation(userId, sessionId, userQuery, option
   });
 
   const durationMs = Date.now() - startAt;
-  logger.log('RETRIEVAL_COMPLETE', {
-    userId,
-    durationMs,
-    finalContextTokens: budgetedContext.totalTokens,
-    budgetUsagePercent: budgetedContext.budgetUsagePercent,
-    isLiveContext,
-    selectedCount: filtered.length,
-  });
-
-  if (isLiveContext && durationMs > 500) {
-    logger.log('LIVE_RETRIEVAL_SLOW', {
-      userId,
-      durationMs,
-      warning: 'Memory retrieval took longer than ideal for Live session',
-    });
-  }
 
   const finalMemoryRevision = await WorkingMemoryRedis.getSemanticMemoryRevision(userId);
   if (finalMemoryRevision !== memoryRevision) {
-    traceLog('memory_revision_changed_during_retrieval', {
-      memoryTraceId,
-      userId,
-      sessionId,
-      before: memoryRevision,
-      after: finalMemoryRevision,
-      decision: 'retrieval_result_must_be_refreshed_by_caller',
-    });
   }
 
   return {

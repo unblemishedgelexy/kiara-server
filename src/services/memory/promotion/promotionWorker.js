@@ -3,7 +3,6 @@
 const { env } = require('../../../config/env');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 const memoryPromotionService = require('./memoryPromotionService');
-const logger = require('../utils/memoryLogger');
 const { isWipeInProgress } = require('../deletion/userMemoryWipeService');
 
 let promotionInterval = null;
@@ -13,7 +12,6 @@ async function _collectUserIds() {
     const userIds = await WorkingMemoryRedis.getPromotionCandidates(env.promotionWorkerLimit);
     return Array.isArray(userIds) ? userIds.filter(Boolean).slice(0, env.promotionWorkerLimit) : [];
   } catch (err) {
-    logger.error('PROMOTION_WORKER_QUEUE_ERROR', err, { mode: 'promotion-worker' });
     return [];
   }
 }
@@ -44,7 +42,6 @@ async function _runPromotionCycle() {
     for (const userId of userIds) {
       try {
         if (await isWipeInProgress(userId)) {
-          logger.log('PROMOTION_SKIP_USER_WIPE_LOCKED', { userId });
           continue;
         }
 
@@ -56,7 +53,6 @@ async function _runPromotionCycle() {
 
           if (!exists) {
             // User was wiped; remove from queue and skip promotion
-            logger.log('PROMOTION_SKIP_USER_WIPED', { userId, reason: 'working_memory_not_found' });
             await WorkingMemoryRedis.removePromotionCandidate(userId);
             continue;
           }
@@ -87,25 +83,11 @@ async function _runPromotionCycle() {
         }
       } catch (err) {
         await WorkingMemoryRedis.recordPromotionFailure(userId, err);
-        logger.error('PROMOTION_CYCLE_ERROR', err, { userId, mode: 'promotion-worker' });
       }
     }
 
     const queueMetrics = await WorkingMemoryRedis.getPromotionQueueMetrics();
-    logger.promotionMetrics({
-      queuedUsers: queueMetrics.queuedUsers,
-      promotionDurationMs: Date.now() - startedAt,
-      embeddingDurationMs,
-      pineconeDurationMs,
-      episodesPromoted,
-      semanticMemoriesUpdated,
-      duplicatePromotionsSkipped,
-      pendingRetries: queueMetrics.pendingRetries,
-      averagePromotionSize: promotionMetricCount ? Math.round(totalPromotionSize / promotionMetricCount) : 0,
-      compressionRatio: promotionMetricCount ? Number((totalCompressionRatio / promotionMetricCount).toFixed(3)) : 0,
-    });
   } catch (err) {
-    logger.error('PROMOTION_WORKER_ERROR', err, { mode: 'promotion-worker' });
   }
 }
 
@@ -120,13 +102,11 @@ function startPromotionWorker() {
 
   setImmediate(() => {
     _runPromotionCycle().catch((err) => {
-      logger.error('PROMOTION_WORKER_STARTUP_ERROR', err, { mode: 'promotion-worker' });
     });
   });
 
   promotionInterval = setInterval(() => {
     _runPromotionCycle().catch((err) => {
-      logger.error('PROMOTION_WORKER_INTERVAL_ERROR', err, { mode: 'promotion-worker' });
     });
   }, env.promotionWorkerIntervalMs);
 }

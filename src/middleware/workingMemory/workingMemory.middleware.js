@@ -12,7 +12,6 @@ const {
   MissingSessionError,
   EmptyMessageError,
 } = require('../../utils/workingMemory/errors');
-const { log: traceLog } = require('../../services/memory/utils/memoryTrace');
 
 class WorkingMemoryMiddleware {
   static _generateId(prefix = 's') {
@@ -20,20 +19,9 @@ class WorkingMemoryMiddleware {
   }
 
   static bindAuthenticatedUser(req, res, next) {
-    console.info('[ENTERED] WorkingMemoryMiddleware.bindAuthenticatedUser', { timestamp: new Date().toISOString() });
     const authenticatedUserId = req.userId ? String(req.userId).trim() : '';
-    traceLog('identity_validation', {
-      traceId: req.memoryTraceId,
-      requestId: req.requestId,
-      userId: authenticatedUserId || null,
-      suppliedUserIdExists: Boolean(req.body?.userId || req.query?.userId || req.params?.userId),
-      accepted: Boolean(authenticatedUserId),
-      endpoint: req.originalUrl,
-      operation: 'working_memory_request',
-    });
 
     if (!authenticatedUserId) {
-      console.info('[OUTPUT] WorkingMemoryMiddleware.bindAuthenticatedUser', { result: 'no-auth' });
       return res.status(401).json({
         success: false,
         error: 'Authentication required',
@@ -66,7 +54,6 @@ class WorkingMemoryMiddleware {
     if (req.params && typeof req.params === 'object' && 'userId' in req.params) {
       req.params.userId = authenticatedUserId;
     }
-    console.info('[OUTPUT] WorkingMemoryMiddleware.bindAuthenticatedUser', { result: 'bound', userId: authenticatedUserId });
     next();
   }
 
@@ -85,7 +72,6 @@ class WorkingMemoryMiddleware {
           timestamp: new Date().toISOString(),
         });
       }
-      console.info('[ENTERED] WorkingMemoryMiddleware.validateSaveRequest', { timestamp: new Date().toISOString() });
       let { userId, sessionId, userMessage, aiResponse, conversationId } = req.body || {};
 
       // If sessionId is missing or a placeholder like 'unknown', generate server-side IDs
@@ -101,23 +87,8 @@ class WorkingMemoryMiddleware {
 
       ({ userId, sessionId, userMessage, aiResponse } = req.body);
 
-      console.info('[INPUT] WorkingMemoryMiddleware.validateSaveRequest', { userId, sessionId, userMessageLength: userMessage?.length, aiResponseLength: aiResponse?.length });
-      traceLog('incoming_memory_payload', {
-        traceId: req.memoryTraceId,
-        requestId: req.requestId,
-        userId,
-        sessionId,
-        operation: 'save_turn',
-        memoryCount: userMessage ? 1 : 0,
-        categories: ['conversation'],
-        logicalKeys: [],
-        userMessageLength: String(userMessage || '').length,
-        aiResponseLength: String(aiResponse || '').length,
-      });
-
       // Validate userId
       if (!userId || typeof userId !== 'string' || userId.trim().length === 0) {
-        console.info('[OUTPUT] WorkingMemoryMiddleware.validateSaveRequest', { result: 'invalid_user' });
         return res.status(400).json({
           success: false,
           error: 'Invalid userId',
@@ -137,7 +108,6 @@ class WorkingMemoryMiddleware {
 
       // Validate userMessage (MUST be complete, not streaming)
       if (!userMessage || typeof userMessage !== 'string' || userMessage.trim().length === 0) {
-        console.info('[OUTPUT] WorkingMemoryMiddleware.validateSaveRequest', { result: 'empty_user_message' });
         return res.status(400).json({
           success: false,
           error: 'User message cannot be empty',
@@ -147,7 +117,6 @@ class WorkingMemoryMiddleware {
 
       // Validate aiResponse (MUST be complete, not streaming)
       if (!aiResponse || typeof aiResponse !== 'string' || aiResponse.trim().length === 0) {
-        console.info('[OUTPUT] WorkingMemoryMiddleware.validateSaveRequest', { result: 'empty_ai_response' });
         return res.status(400).json({
           success: false,
           error: 'AI response cannot be empty',
@@ -158,7 +127,6 @@ class WorkingMemoryMiddleware {
       // Check for streaming/partial indicators
       // These should NOT be in a "save" request - data must be complete
       if (userMessage.includes('[STREAMING]') || userMessage.includes('[INCOMPLETE]')) {
-        console.info('[OUTPUT] WorkingMemoryMiddleware.validateSaveRequest', { result: 'incomplete_user' });
         return res.status(400).json({
           success: false,
           error: 'User message appears to be incomplete/streaming. Wait for complete message before saving.',
@@ -167,7 +135,6 @@ class WorkingMemoryMiddleware {
       }
 
       if (aiResponse.includes('[STREAMING]') || aiResponse.includes('[INCOMPLETE]')) {
-        console.info('[OUTPUT] WorkingMemoryMiddleware.validateSaveRequest', { result: 'incomplete_ai' });
         return res.status(400).json({
           success: false,
           error: 'AI response appears to be incomplete/streaming. Wait for complete response before saving.',
@@ -175,7 +142,6 @@ class WorkingMemoryMiddleware {
         });
       }
 
-      console.info('[EXITED] WorkingMemoryMiddleware.validateSaveRequest', { result: 'valid', userId, sessionId });
       next();
     } catch (error) {
       res.status(500).json({
@@ -297,7 +263,6 @@ class WorkingMemoryMiddleware {
    * Error handler for working memory routes
    */
   static errorHandler(err, req, res, next) {
-    console.error('[WorkingMemoryMiddleware] Error:', err.message);
 
     const statusCode = err.statusCode || 500;
     const code = err.code || 'UNKNOWN_ERROR';

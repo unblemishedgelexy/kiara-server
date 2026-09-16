@@ -14,7 +14,6 @@
  * Private module — only memory.service.js imports this.
  */
 
-const logger = require('../utils/memoryLogger');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 
 // ─────────────────────────────────────────────
@@ -162,9 +161,7 @@ function buildRelationshipSection(relationships, seenKeys, limit = 8) {
  * @returns {string} formatted prompt context
  */
 function buildContext({ userId, facts = [], task = null, recentTurns = [], recallMatch = null, identity = [], relationships = {}, goal = null, activeProject = null, preferences = [], episodes = [] } = {}) {
-  const startedAt = Date.now();
   const seenKeys = new Set();
-  logger.logPromptBuilder(userId, { status: 'started', turnCount: Array.isArray(recentTurns) ? recentTurns.length : 0 });
 
   const sections = [];
 
@@ -234,13 +231,8 @@ function buildContext({ userId, facts = [], task = null, recentTurns = [], recal
   // Final assembly and dedupe already handled by seenKeys
   const context = sections.join('\n\n').trim();
 
-  logger.logPromptBuilder(userId, { status: 'finished', durationMs: Date.now() - startedAt, contextLength: context.length, sectionCount: sections.length });
-  logger.logFinalContext(userId, context);
-  logger.log('CONTEXT_BUILD', { userId, sectionCount: sections.length, finalLength: context.length, ts: new Date().toISOString() });
-
   // Token estimate
   const tokens = Math.ceil(context.length / 4);
-  logger.log('CONTEXT_TOKENS', { userId, tokens, chars: context.length });
 
   return context;
 }

@@ -20,7 +20,6 @@
  *   technology.react.stack
  */
 
-const logger = require('./memoryLogger');
 
 // ────────────────────────────────────────────────────────────────────
 // Identity Type Definitions

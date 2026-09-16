@@ -1,5 +1,8 @@
 const authService = require('../services/../services/auth/authService');
 const { verifyRefreshToken } = require('../services/../services/auth/tokenService');
+const { generateAccessToken, generateRefreshToken } = require('../services/../services/auth/tokenService');
+const UserModel = require('../models/User');
+const bcrypt = require('bcryptjs');
 const googleOAuthService = require('../services/../services/auth/googleOAuthService');
 
 
@@ -16,6 +19,41 @@ function buildAuthPayload(user, accessToken, refreshToken) {
       user: safeUser,
     },
   };
+}
+
+async function createLocalDevelopmentSession(req, res) {
+  const { env } = require('../config/env');
+  if (!env.localDevAuthEnabled) {
+    return res.status(404).json({ success: false, message: 'Not found.' });
+  }
+
+  const email = 'kiara.local.test@gmail.com';
+  let user = await UserModel.findOne({ email });
+  if (!user) {
+    user = await UserModel.create({
+      email,
+      firstName: 'Local',
+      lastName: 'Test User',
+      displayName: 'Local Test User',
+      passwordHash: await bcrypt.hash(`local-${Date.now()}-${Math.random()}`, 12),
+      emailVerified: true,
+      mode: 'registered',
+      isActive: true,
+    });
+  }
+
+  const accessToken = generateAccessToken({ sub: user._id });
+  const refreshToken = generateRefreshToken({ sub: user._id });
+  await authService.createSession(user._id, refreshToken, {
+    userAgent: req.headers['user-agent'],
+    ip: req.ip,
+  });
+
+  return res.json({
+    success: true,
+    message: 'Local development session created.',
+    ...buildAuthPayload(user, accessToken, refreshToken),
+  });
 }
 
 // ============= REGISTRATION =============
@@ -388,6 +426,7 @@ async function resetPasswordHandler(req, res, next) {
 }
 
 module.exports = { 
+  createLocalDevelopmentSession,
   register, 
   sendOtp, 
   verifyOtp, 

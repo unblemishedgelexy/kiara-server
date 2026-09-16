@@ -2,19 +2,11 @@
 
 const STABILITY_WINDOW_MS = 15 * 60 * 1000;
 const gateBySession = new Map();
-let lastGateLog = null;
 
 function getSessionKey(userId, sessionId) {
   return `${userId || 'anonymous'}:${sessionId || 'anonymous-session'}`;
 }
 
-function logGateChange(message) {
-  if (lastGateLog === message) {
-    return;
-  }
-  lastGateLog = message;
-  console.info('[LIVE-STABILITY]', message);
-}
 
 function setMemoryEligibility({ userId, sessionId, eligible = false, reason = 'manual', enabledAt = Date.now() } = {}) {
   const key = getSessionKey(userId, sessionId);
@@ -29,7 +21,6 @@ function setMemoryEligibility({ userId, sessionId, eligible = false, reason = 'm
       startedAt: Date.now(),
       lastHeartbeatAt: Date.now(),
     });
-    logGateChange(`Session became unhealthy — memory eligibility reset (${reason})`);
     return { eligible: false, reason };
   }
 
@@ -43,7 +34,6 @@ function setMemoryEligibility({ userId, sessionId, eligible = false, reason = 'm
     lastHeartbeatAt: Date.now(),
   });
 
-  logGateChange(`Session healthy — memory eligibility enabled (${reason})`);
   return { eligible: true, reason, enabledAt };
 }
 
@@ -85,7 +75,6 @@ function clearSession(userId, sessionId) {
   const key = getSessionKey(userId, sessionId);
   if (gateBySession.has(key)) {
     gateBySession.delete(key);
-    logGateChange('Session cleanup — memory eligibility reset');
   }
 }
 

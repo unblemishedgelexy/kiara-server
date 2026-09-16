@@ -63,17 +63,8 @@ const createApp = () => {
       req.requestId = randomUUID();
     }
 
-    try {
-      req.memoryTraceId = typeof req.headers['x-memory-trace-id'] === 'string' && req.headers['x-memory-trace-id'].trim()
-        ? req.headers['x-memory-trace-id'].trim()
-        : `memtrace_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    } catch {
-      req.memoryTraceId = `memtrace_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    }
-
     req.rawBody = '';
     res.setHeader('X-Request-Id', req.requestId);
-    res.setHeader('X-Memory-Trace-Id', req.memoryTraceId);
     req.lifecycleTrigger = typeof req.headers['x-kiara-trigger'] === 'string' && req.headers['x-kiara-trigger'].trim()
       ? req.headers['x-kiara-trigger'].trim()
       : 'USER_ACTION';

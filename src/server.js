@@ -13,6 +13,14 @@ async function startServer() {
 
   const memoryEnabled = Boolean(env.liveMemoryEnabled);
   const promotionWorkerEnabled = memoryEnabled && env.enablePinecone && env.enablePromotionWorker;
+
+  console.log('[MEMORY_SYSTEM]', JSON.stringify({
+    enabled: memoryEnabled,
+    mode: memoryEnabled ? 'enabled' : 'disabled-during-live-stability',
+    promotionWorkerEnabled,
+    timestamp: new Date().toISOString(),
+  }));
+
   if (promotionWorkerEnabled) {
     promotionWorker.startPromotionWorker();
   }

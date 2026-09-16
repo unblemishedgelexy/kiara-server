@@ -115,18 +115,15 @@ function classifyCandidate(text, contextText) {
   return 'fact';
 }
 
-const { log: traceLog } = require('./utils/memoryTrace');
 
 function extractMemoryCandidates(rawText, context = {}) {
   const sourceText = String(rawText || '').trim();
-  const memoryTraceId = context.memoryTraceId || null;
   const sourceRole = context.sourceRole || 'unknown';  // Track source: 'user' or 'assistant'
   if (!sourceText) {
     return [];
   }
 
   const text = sourceText.replace(/\s+/g, ' ').trim();
-  traceLog('candidate_input', { memoryTraceId, source: sourceRole, candidates: [sourceText] });
   const tokens = text.split(/\s+/).filter(Boolean);
 
   const candidates = [];
@@ -185,28 +182,7 @@ function extractMemoryCandidates(rawText, context = {}) {
       hasNoUserSpecificEvidence: !hasUserSpecificEvidence,
     };
 
-    traceLog('semantic_classification', {
-      memoryTraceId,
-      source: sourceRole,
-      candidate: candidate.value,
-      category: candidate.category,
-      confidence: Number(candidate.preliminaryConfidence || 0).toFixed(3),
-      evidence: candidate.evidence,
-      sourceTurnId: context.sourceTurnId || null,
-    });
-
     const valid = candidate.preliminaryConfidence >= 0.4;
-    traceLog('candidate_validation', {
-      memoryTraceId,
-      source: sourceRole,
-      candidate: candidate.value,
-      category: candidate.category,
-      validator: `${candidate.category}_validator`,
-      valid,
-      confidence: Number(candidate.preliminaryConfidence || 0).toFixed(3),
-      evidence: candidate.evidence,
-      rejectionReason: valid ? null : 'low_confidence_or_discourse_fragment',
-    });
 
     if (candidate.preliminaryConfidence >= 0.4) {
       candidates.push(candidate);
@@ -215,14 +191,6 @@ function extractMemoryCandidates(rawText, context = {}) {
 
   const deduped = dedupeCandidates(candidates);
   const rejectedCandidates = Array.from(new Set((candidates || []).map((c) => c.value))).filter((value) => !deduped.some((item) => item.value === value));
-  traceLog('garbage_filter_result', {
-    memoryTraceId,
-    source: sourceRole,
-    inputCandidates: [sourceText],
-    rejectedCandidates,
-    rejectedReasons: ['low_confidence_or_discourse_fragment'],
-    survivingCandidates: deduped.map((candidate) => ({ candidate: candidate.value, category: candidate.category, source: candidate.source, decision: 'KEEP', reason: 'explicit_identity_evidence' }))
-  });
   return deduped;
 }
 
@@ -353,13 +321,6 @@ function extractCanonicalSemanticMemories(rawText, context = {}) {
 
   for (const candidate of candidates) {
     if (Number(candidate.preliminaryConfidence || 0) < 0.55) {
-      traceLog('canonical_candidate_rejected', {
-        memoryTraceId: context.memoryTraceId || null,
-        source: candidate.source || 'unknown',
-        category: candidate.category,
-        reason: 'memory_worthiness_below_threshold',
-        memoryWorthy: false,
-      });
       continue;
     }
     let category = String(candidate.category || 'fact');

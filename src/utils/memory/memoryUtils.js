@@ -2,7 +2,6 @@
 
 const crypto = require('crypto');
 const { env } = require('../../config/env');
-const logger = require('../../services/memory/utils/memoryLogger');
 const embeddingProvider = require('../../services/embedding/embeddingProvider');
 
 function normalizeText(value) {

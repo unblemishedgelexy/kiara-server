@@ -3,11 +3,9 @@
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 const redisService = require('../../infrastructure/redisService');
 const pineconeService = require('../../pineconeService');
-const logger = require('../utils/memoryLogger');
 
 async function consolidateUser(userId, { limitEpisodes = 200 } = {}) {
   const startedAt = Date.now();
-  logger.log('CONSOLIDATION_START', { userId, ts: new Date().toISOString() });
   const summary = { userId, mergedFacts: 0, mergedRelationships: 0, linkedEpisodes: 0, archived: 0, updatedStats: 0 };
 
   try {
@@ -41,9 +39,7 @@ async function consolidateUser(userId, { limitEpisodes = 200 } = {}) {
     // Write back merged semantic memories
     try {
       await WorkingMemoryRedis.upsertSemanticMemories(userId, merged);
-      logger.log('CONSOLIDATION_SEMANTIC_MERGED', { userId, mergedCounts: Object.fromEntries(Object.entries(merged).map(([k, v]) => [k, v.length])) });
     } catch (e) {
-      logger.logError('CONSOLIDATION_SEMANTIC_WRITE_ERROR', e, { userId });
     }
 
     // 2) Merge duplicate relationships (case-insensitive names)
@@ -78,7 +74,6 @@ async function consolidateUser(userId, { limitEpisodes = 200 } = {}) {
       const canonical = (r.personName && String(r.personName).trim()) || key.split(' ').map((s) => s[0]?.toUpperCase() + s.slice(1)).join(' ');
       await WorkingMemoryRedis.upsertRelationship(userId, canonical, r);
     }
-    logger.log('CONSOLIDATION_RELATIONSHIPS_MERGED', { userId, merged: summary.mergedRelationships });
 
     // 3) Strengthen important memories and increase confidence for repeated facts
     // Iterate memory:stats keys for user's episodes and semantic entries
@@ -106,7 +101,6 @@ async function consolidateUser(userId, { limitEpisodes = 200 } = {}) {
           statsSummary.boosted += 1;
         }
       } catch (e) {
-        logger.logError('CONSOLIDATION_STATS_ERROR', e, { userId });
       }
     }
     summary.updatedStats = statsSummary.boosted;
@@ -143,7 +137,6 @@ async function consolidateUser(userId, { limitEpisodes = 200 } = {}) {
         }
       }
     } catch (e) {
-      logger.logError('CONSOLIDATION_EPISODE_LINK_ERROR', e, { userId });
     }
 
     // 5) Archive obsolete semantic entries if superseded by newer/high-confidence entries
@@ -151,17 +144,14 @@ async function consolidateUser(userId, { limitEpisodes = 200 } = {}) {
     summary.archived = summary.mergedFacts; // approximation
 
     const durationMs = Date.now() - startedAt;
-    logger.log('CONSOLIDATION_SUCCESS', { userId, durationMs, summary });
     return { success: true, summary };
   } catch (err) {
-    logger.logError('CONSOLIDATION_FAIL', err, { userId });
     return { success: false, error: String(err) };
   }
 }
 
 async function consolidateAll({ maxUsers = 50 } = {}) {
   const startedAt = Date.now();
-  logger.log('CONSOLIDATION_ALL_START', { maxUsers, ts: new Date().toISOString() });
   try {
     const client = await redisService.getRedisClient();
     const iter = client.scanIterator({ MATCH: 'memory:promotion:promoted:*', COUNT: 200 });
@@ -177,10 +167,8 @@ async function consolidateAll({ maxUsers = 50 } = {}) {
       results.push(res);
     }
     const durationMs = Date.now() - startedAt;
-    logger.log('CONSOLIDATION_ALL_SUCCESS', { durationMs, processed: users.length });
     return { success: true, processed: users.length, results };
   } catch (err) {
-    logger.logError('CONSOLIDATION_ALL_FAIL', err, {});
     return { success: false, error: String(err) };
   }
 }

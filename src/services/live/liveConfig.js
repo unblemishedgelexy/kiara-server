@@ -1,8 +1,16 @@
+const path = require('path');
 const {
   GEMINI_LIVE_MODEL,
   GEMINI_LIVE_SYSTEM_INSTRUCTION,
   GEMINI_LIVE_VOICE,
 } = require('../../config/constants');
+
+let capabilityRegistry = null;
+try {
+  capabilityRegistry = require(path.resolve(__dirname, '../../../../Kiara-ai/worker/src/capabilityRegistry.js')).capabilityRegistry || null;
+} catch {
+  capabilityRegistry = null;
+}
 
 const SUPPORTED_GEMINI_LIVE_MODELS = new Set([
   'gemini-3.1-flash-live-preview',
@@ -80,15 +88,69 @@ function createLiveSessionConfig(options = {}) {
   };
 }
 
+function normalizeParameterType(value) {
+  if (Array.isArray(value)) {
+    return 'ARRAY';
+  }
+  if (value && typeof value === 'object') {
+    return 'OBJECT';
+  }
+  return 'STRING';
+}
+
+function capabilityRegistryToFunctionDeclarations(registry) {
+  const capabilities = Array.isArray(registry?.capabilities) ? registry.capabilities : [];
+  return capabilities.map((capability) => {
+    const params = capability?.args && typeof capability.args === 'object' ? capability.args : {};
+    const required = Array.isArray(capability?.requiredArguments) ? capability.requiredArguments : [];
+    const optional = Array.isArray(capability?.optionalArguments) ? capability.optionalArguments : [];
+    const allParameterKeys = Array.from(new Set([...Object.keys(params), ...required, ...optional]));
+    const properties = {};
+    allParameterKeys.forEach((key) => {
+      const value = params[key];
+      properties[key] = {
+        type: normalizeParameterType(value),
+        description: typeof value === 'string' ? value : 'Capability argument',
+      };
+    });
+
+    return {
+      name: String(capability?.name || '').trim(),
+      description: String(capability?.purpose || capability?.description || ''),
+      parameters: {
+        type: 'OBJECT',
+        properties,
+        required: allParameterKeys.filter((key) => required.includes(key)),
+      },
+    };
+  }).filter((tool) => Boolean(tool.name));
+}
+
+function createGeminiToolsFromCapabilityRegistry(registry = capabilityRegistry) {
+  const functionDeclarations = capabilityRegistryToFunctionDeclarations(registry);
+  if (!functionDeclarations.length) {
+    return [];
+  }
+
+  return [
+    {
+      functionDeclarations,
+    },
+  ];
+}
+
 function createPublicLiveSessionConfig(sessionConfig) {
   return {
     model: sessionConfig.model,
     responseModalities: sessionConfig.responseModalities,
+    systemInstruction: sessionConfig.systemInstruction,
+    tools: createGeminiToolsFromCapabilityRegistry(),
     voiceName: sessionConfig.voiceName,
   };
 }
 
 function createLiveConnectConfig(sessionConfig) {
+  const tools = createGeminiToolsFromCapabilityRegistry();
   return {
     inputAudioTranscription: {},
     outputAudioTranscription: {},
@@ -114,6 +176,7 @@ function createLiveConnectConfig(sessionConfig) {
     },
     systemInstruction: sessionConfig.systemInstruction,
     temperature: 0.7,
+    tools,
   };
 }
 
@@ -123,4 +186,6 @@ module.exports = {
   createLiveConnectConfig,
   createPublicLiveSessionConfig,
   createLiveSessionConfig,
+  createGeminiToolsFromCapabilityRegistry,
+  capabilityRegistryToFunctionDeclarations,
 };

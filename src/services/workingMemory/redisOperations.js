@@ -13,8 +13,6 @@ const {
   RedisTimeoutError,
   JSONParseError,
 } = require('../../utils/workingMemory/errors');
-const logger = require('../../utils/workingMemory/logger');
-const { log: traceLog } = require('../memory/utils/memoryTrace');
 
 const MEMORY_SLIDING_WINDOW_MS = 20 * 60 * 1000; // 20 minutes
 const INACTIVE_KEY_TTL_SECONDS = 24 * 60 * 60; // 24 hours
@@ -114,7 +112,6 @@ class WorkingMemoryRedis {
       await client.set(revisionKey, '1');
       return 1;
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, 'getSemanticMemoryRevision');
       return 0;
     }
   }
@@ -256,7 +253,6 @@ class WorkingMemoryRedis {
       return results;
     } catch (err) {
       if (err && err.message && err.message.includes('EXECABORT')) {
-        logger.logError('REDIS_EXEC_ABORT', err.message, err.stack, context.userId || '', context.sessionId || '');
       }
       throw err;
     }
@@ -453,10 +449,8 @@ class WorkingMemoryRedis {
     metadata = {}
   ) {
     try {
-      console.info('[ENTERED] WorkingMemoryRedis.saveConversationTurn', { userId, sessionId, userMessageLength: userMessage?.length, aiResponseLength: aiResponse?.length, ttl });
       const client = await redisService.getRedisClient();
       if (!client) {
-        console.info('[OUTPUT] WorkingMemoryRedis.saveConversationTurn', { result: 'no-redis-client' });
         throw new RedisConnectionError('Redis client not initialized');
       }
 
@@ -475,7 +469,6 @@ class WorkingMemoryRedis {
 
       const key = this.buildKey(userId);
       const existingTurnsCount = await client.lLen(key);
-      console.info('[INPUT] WorkingMemoryRedis.saveConversationTurn', { key, existingTurnsCount });
 
       const normalizedUserMessage = this.normalizeMessage(userMessage);
       const normalizedAssistantMessage = this.normalizeMessage(aiResponse);
@@ -497,7 +490,6 @@ class WorkingMemoryRedis {
       }
 
       const multi = this.createRedisPipeline(client);
-      console.info('[RPUSH] payloadPreview', { key, payloadPreview: payload.slice(0, 300) });
       multi.rPush(key, payload);
       multi.expire(key, INACTIVE_KEY_TTL_SECONDS);
 
@@ -505,8 +497,6 @@ class WorkingMemoryRedis {
       const results = await this.executeRedisPipeline(multi, { userId, sessionId });
       const saveDurationMs = Date.now() - start;
 
-      console.info('[RPUSH_RESULT] WorkingMemoryRedis.saveConversationTurn', { key, results, durationMs: saveDurationMs });
-      traceLog('redis_working_write_result', { traceId: metadata.memoryTraceId, userId, sessionId, operation: 'rpush_working_memory', key, success: true, resultingStatus: 'active', memoryId: turnId || null, durationMs: saveDurationMs });
 
       if (!results || results.length < 2) {
         throw new RedisConnectionError('Pipeline execution failed');
@@ -516,7 +506,6 @@ class WorkingMemoryRedis {
       try {
         cleanupCount = await this.cleanupExpiredTurns(client, key);
       } catch (cleanupError) {
-        logger.logError('STM_CLEANUP_ERROR', cleanupError.message || String(cleanupError), cleanupError.stack, userId, sessionId);
       }
 
       const totalTurns = await client.lLen(key);
@@ -533,11 +522,7 @@ class WorkingMemoryRedis {
         const ratio = charsBefore > 0 ? (charsAfter / charsBefore) : 1;
         const avgCharsPerTurn = totalTurns > 0 ? Math.round(charsAfter / totalTurns) : 0;
         const currentTtl = await client.ttl(key);
-        console.info('[STM_COMPRESSION_METRICS]', JSON.stringify({ userId, existingTurnsCount, totalTurns, charsBefore, charsAfter, ratio: Number(ratio.toFixed(3)), avgCharsPerTurn, currentTtl, cleanupCount, ts: new Date().toISOString() }));
-        logger.logShortTermMemory(userId, sessionId, key, existingTurnsCount, totalTurns, currentTtl, saveDurationMs, 'saved');
-        console.info('[OUTPUT] WorkingMemoryRedis.saveConversationTurn', { turnId, totalTurns, cleanupCount, ttl: currentTtl });
       } catch (obsErr) {
-        logger.logError('REDIS_OBSERVABILITY_ERROR', obsErr.message || String(obsErr), obsErr.stack, userId, sessionId);
       }
 
       // Persist to Mongo (backup)
@@ -555,28 +540,12 @@ class WorkingMemoryRedis {
             timestamp,
           },
         });
-        traceLog('mongo_backup_result', { traceId: metadata.memoryTraceId, userId, sessionId, operation: 'conversation_turn_backup', attempted: true, success: true, affectedRecordType: 'ConversationTurn', memoryId: turnId });
       } catch (mongoError) {
-        traceLog('mongo_backup_result', { traceId: metadata.memoryTraceId, userId, sessionId, operation: 'conversation_turn_backup', attempted: true, success: false, affectedRecordType: 'ConversationTurn', memoryId: turnId, reason: mongoError.message || String(mongoError) });
-        logger.logError(
-          mongoError.name || 'MongoSaveError',
-          mongoError.message || 'Failed to persist raw conversation turn to MongoDB',
-          mongoError.stack,
-          userId,
-          sessionId
-        );
       }
 
     try {
       await this.enqueuePromotionCandidate(userId);
     } catch (queueError) {
-      logger.logError(
-        queueError.name || 'PromotionQueueError',
-        queueError.message || String(queueError),
-        queueError.stack || null,
-        userId,
-        sessionId
-      );
     }
 
       return {
@@ -585,13 +554,6 @@ class WorkingMemoryRedis {
         turnId,
       };
     } catch (error) {
-      logger.logError(
-        error.name,
-        error.message,
-        error.stack,
-        userId,
-        sessionId
-      );
       throw error;
     }
   }
@@ -682,7 +644,6 @@ class WorkingMemoryRedis {
 
       return selected;
     } catch (error) {
-      logger.logError(error.name, error.message, error.stack, userId, '');
       throw error;
     }
   }
@@ -725,7 +686,6 @@ class WorkingMemoryRedis {
 
       return true;
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return false;
     }
   }
@@ -750,7 +710,6 @@ class WorkingMemoryRedis {
       }
       return members.slice(0, count).map(String);
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, '', '');
       return [];
     }
   }
@@ -770,7 +729,6 @@ class WorkingMemoryRedis {
       await client.zRem(queueKey, String(userId));
       return true;
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return false;
     }
   }
@@ -801,7 +759,6 @@ class WorkingMemoryRedis {
         lastError: meta.lastError || '',
       };
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return null;
     }
   }
@@ -824,7 +781,6 @@ class WorkingMemoryRedis {
       await this.executeRedisPipeline(ops, { userId });
       return true;
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return false;
     }
   }
@@ -853,7 +809,6 @@ class WorkingMemoryRedis {
       await this.executeRedisPipeline(ops, { userId });
       return true;
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return false;
     }
   }
@@ -889,7 +844,6 @@ class WorkingMemoryRedis {
 
       return true;
     } catch (redisError) {
-      logger.logError(redisError.name || 'RedisError', redisError.message || String(redisError), redisError.stack || null, userId, '');
       return false;
     }
   }
@@ -907,7 +861,6 @@ class WorkingMemoryRedis {
 
       return Boolean(await client.sIsMember(this.buildPromotedEpisodesKey(userId), episodeId));
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return false;
     }
   }
@@ -945,7 +898,6 @@ class WorkingMemoryRedis {
       await this.executeRedisPipeline(ops, { userId });
       return true;
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return false;
     }
   }
@@ -975,7 +927,6 @@ class WorkingMemoryRedis {
         lastAccessedAt: raw.lastAccessedAt || null,
       };
     } catch (err) {
-      logger.logError('MEMORY_STATS_GET_ERROR', err.message || String(err), err.stack || null, '', memoryId);
       return null;
     }
   }
@@ -1000,7 +951,6 @@ class WorkingMemoryRedis {
       await this.executeRedisPipeline(multi, { memoryId });
       return true;
     } catch (err) {
-      logger.logError('MEMORY_STATS_INC_ERROR', err.message || String(err), err.stack || null, '', memoryId);
       return false;
     }
   }
@@ -1025,7 +975,6 @@ class WorkingMemoryRedis {
       await client.hSet(key, ...flatValues);
       return true;
     } catch (err) {
-      logger.logError('MEMORY_STATS_SET_ERROR', err.message || String(err), err.stack || null, '', memoryId);
       return false;
     }
   }
@@ -1077,18 +1026,15 @@ class WorkingMemoryRedis {
               'retrievalPriority', String(Number(newRetrievalPriority.toFixed(4)))
             );
             summary.updated += 1;
-            logger.log('DECAY_APPLIED', { memoryId, oldImportance: importance, newImportance: Number(newImportance.toFixed(4)), ageDays: Number(ageDays.toFixed(1)) });
           } else {
             summary.skipped += 1;
           }
         } catch (inner) {
-          logger.logError('DECAY_ENTRY_ERROR', inner.message || String(inner), inner.stack || null, '', key);
         }
       }
       summary.processed = processed;
       return summary;
     } catch (err) {
-      logger.logError('DECAY_ERROR', err.message || String(err), err.stack || null, '', 'applyDecay');
       return { processed: 0, skipped: 0, updated: 0 };
     }
   }
@@ -1191,7 +1137,6 @@ class WorkingMemoryRedis {
               updatedAt: new Date().toISOString(),
             };
             insertedKeys.add(rejectedHashKey);
-            traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'rejected', logicalKey, oldMemoryId: activeParent?.entry.memoryId || activeParent?.entry.id || null, newMemoryId: normalizedItem.memoryId || normalizedItem.id || null, sourceAuthority: normalizedItem.source, reason: rejectionReason });
             continue;
           }
 
@@ -1218,7 +1163,6 @@ class WorkingMemoryRedis {
             mergedEntries[logicalKey] = activeEntry;
             activeLogicalEntries.set(logicalKey, { entryHash: logicalKey, entry: activeEntry });
             insertedKeys.add(logicalKey);
-            traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'duplicate_selected', logicalKey, oldMemoryId: currentActive.entry.memoryId || currentActive.entry.id || null, newMemoryId: activeEntry.memoryId || activeEntry.id || null, reason: 'same_logical_key_and_value' });
             continue;
           }
 
@@ -1275,7 +1219,6 @@ class WorkingMemoryRedis {
               activeLogicalEntries.set(logicalKey, { entryHash: logicalKey, entry: normalizedItem });
               insertedKeys.add(logicalKey);
               canonicalChangedKeys.add(logicalKey);
-              traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'superseded', logicalKey, oldMemoryId: existing.memoryId || existing.id || null, newMemoryId: normalizedItem.memoryId || normalizedItem.id || null, sourceAuthority: normalizedItem.source, reason: logicalKeyCorrection ? 'same_source_correction' : 'higher_or_equal_authority' });
               continue;
             }
 
@@ -1293,7 +1236,6 @@ class WorkingMemoryRedis {
             const rejectedHashKey = `${logicalKey}:rejected:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
             mergedEntries[rejectedHashKey] = rejectedEntry;
             insertedKeys.add(rejectedHashKey);
-            traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'rejected', logicalKey, oldMemoryId: currentActive.entry.memoryId || currentActive.entry.id || null, newMemoryId: normalizedItem.memoryId || normalizedItem.id || null, sourceAuthority: normalizedItem.source, reason: 'lower_authority_than_active' });
             continue;
           }
 
@@ -1307,7 +1249,6 @@ class WorkingMemoryRedis {
           activeLogicalEntries.set(logicalKey, { entryHash: logicalKey, entry: normalizedItem });
           insertedKeys.add(logicalKey);
           canonicalChangedKeys.add(logicalKey);
-          traceLog('authority_conflict_decision', { traceId: options.memoryTraceId, userId, operation: 'semantic_upsert', decision: 'created', logicalKey, oldMemoryId: null, newMemoryId: normalizedItem.memoryId || normalizedItem.id || null, sourceAuthority: normalizedItem.source, reason: 'no_active_candidate' });
         }
       }
 
@@ -1340,7 +1281,6 @@ class WorkingMemoryRedis {
         await releaseSemanticWriteLock(client, semanticLock);
       }
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return 0;
     }
   }
@@ -1388,15 +1328,8 @@ class WorkingMemoryRedis {
         }
       }
 
-      logger.log('REJECTED_MEMORY_CLEANUP_SUMMARY', {
-        inspected,
-        removed,
-        retentionSeconds: this.getRejectedMemoryRetentionSeconds(),
-        userId: userId || 'all',
-      });
       return { inspected, removed };
     } catch (err) {
-      logger.logError('REJECTED_MEMORY_CLEANUP_ERROR', err.message || String(err), err.stack || null, userId || '', 'cleanupRejectedSemanticMemories');
       return { inspected: 0, removed: 0, error: err.message || String(err) };
     }
   }
@@ -1408,7 +1341,6 @@ class WorkingMemoryRedis {
 
     rejectedMemoryCleanupTimer = setInterval(() => {
       this.cleanupRejectedSemanticMemories().catch((err) => {
-        logger.logError('REJECTED_MEMORY_CLEANUP_INTERVAL_ERROR', err.message || String(err), err.stack || null, '', 'scheduler');
       });
     }, this.getRejectedMemoryCleanupIntervalMs());
 
@@ -1450,7 +1382,6 @@ class WorkingMemoryRedis {
       await client.expire(key, PROMOTION_QUEUE_TTL_SECONDS);
       return true;
     } catch (err) {
-      logger.logError('RELATIONSHIP_UPSERT_ERROR', err.message || String(err), err.stack || null, userId, personName);
       return false;
     }
   }
@@ -1467,7 +1398,6 @@ class WorkingMemoryRedis {
       }
       return out;
     } catch (err) {
-      logger.logError('RELATIONSHIP_GET_ERROR', err.message || String(err), err.stack || null, userId, 'getRelationships');
       return {};
     }
   }
@@ -1523,7 +1453,6 @@ class WorkingMemoryRedis {
 
       return grouped;
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return {};
     }
   }
@@ -1614,7 +1543,6 @@ class WorkingMemoryRedis {
 
       return deleted;
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, '');
       return 0;
     }
   }
@@ -1671,7 +1599,6 @@ class WorkingMemoryRedis {
         records: chain.map(({ _hashKey, ...item }) => item),
       };
     } catch (error) {
-      logger.logError(error.name || 'RedisError', error.message || String(error), error.stack || null, userId, String(memoryId));
       return null;
     }
   }
@@ -1719,13 +1646,11 @@ class WorkingMemoryRedis {
       const result = await client.del(key);
 
       if (result > 0) {
-        logger.logMemoryDeleted(userId, 'all', key);
         return true;
       }
 
       return false;
     } catch (error) {
-      logger.logError(error.name, error.message, error.stack, userId, '');
       throw error;
     }
   }
@@ -1747,7 +1672,6 @@ class WorkingMemoryRedis {
 
       return size || 0;
     } catch (error) {
-      logger.logError(error.name, error.message, error.stack, userId, '');
       throw error;
     }
   }
@@ -1769,7 +1693,6 @@ class WorkingMemoryRedis {
 
       return ttl;
     } catch (error) {
-      logger.logError(error.name, error.message, error.stack, userId, '');
       throw error;
     }
   }
@@ -1785,7 +1708,6 @@ class WorkingMemoryRedis {
       await client.ping();
       return true;
     } catch (error) {
-      logger.logError('REDIS_HEALTH_ERROR', String(error), error && error.stack ? error.stack : null, null, '');
       return false;
     }
   }

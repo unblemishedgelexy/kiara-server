@@ -20,7 +20,6 @@ const redisService = require('../../infrastructure/redisService');
 const mongoose = require('mongoose');
 const pineconeService = require('../../pineconeService');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
-const logger = require('../utils/memoryLogger');
 const ConversationTurn = require('../../../models/ConversationTurn');
 const PersonProfile = require('../../../models/PersonProfile');
 const { InvalidUserError } = require('../../../utils/workingMemory/errors');
@@ -53,7 +52,6 @@ async function acquireWipeLock(userId) {
     
     return lockId;
   } catch (err) {
-    logger.logError('WIPE_LOCK_ACQUIRE_ERROR', err.message || String(err), err.stack || null, userId, '');
     return null;
   }
 }
@@ -71,7 +69,6 @@ async function releaseWipeLock(userId, lockId) {
       await client.del(lockKey);
     }
   } catch (err) {
-    logger.logError('WIPE_LOCK_RELEASE_ERROR', err.message || String(err), err.stack || null, userId, '');
   }
 }
 
@@ -81,7 +78,6 @@ async function isWipeInProgress(userId) {
     if (!client) return false;
     return Boolean(await client.exists(buildWipeLockKey(userId)));
   } catch (err) {
-    logger.logError('WIPE_LOCK_CHECK_ERROR', err.message || String(err), err.stack || null, userId, '');
     return true;
   }
 }
@@ -383,16 +379,10 @@ async function wipeUserMemory(userId, options = {}) {
   }
   const wipedAt = new Date().toISOString();
 
-  logger.log('WIPE_START', {
-    userId: normalizedUserId,
-    reason,
-    timestamp: wipedAt,
-  });
 
   // Acquire wipe lock to prevent concurrent wipes
   const lockId = await acquireWipeLock(normalizedUserId);
   if (!lockId) {
-    logger.logError('WIPE_ALREADY_IN_PROGRESS', 'Another wipe is in progress for this user', null, normalizedUserId, '');
     return {
       success: false,
       timestamp: wipedAt,
@@ -427,7 +417,6 @@ async function wipeUserMemory(userId, options = {}) {
       }
     } catch (err) {
       ownershipError = err.message || String(err);
-      logger.logError('WIPE_EPISODE_OWNERSHIP_ERROR', err.message || String(err), err.stack || null, normalizedUserId, '');
     }
 
     // Tier 1: Delete immediate Redis stores (working, semantic, relationships)
@@ -483,16 +472,6 @@ async function wipeUserMemory(userId, options = {}) {
     browserWipeRequired: true, // Frontend must clear its own storage
     results,
   };
-
-  logger.log('WIPE_COMPLETE', {
-    userId: normalizedUserId,
-    success: overallSuccess,
-    timestamp: wipedAt,
-    results: Object.entries(results).reduce((acc, [key, val]) => {
-      acc[key] = val && val.error ? 'ERROR' : (val && val.deleted !== undefined ? (val.deleted ? 'OK' : 'FAILED') : (val && val.removed !== undefined ? (val.removed ? 'OK' : 'FAILED') : 'UNKNOWN'));
-      return acc;
-    }, {}),
-  });
 
   return response;
 }

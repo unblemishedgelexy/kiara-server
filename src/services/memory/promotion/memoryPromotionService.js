@@ -5,7 +5,6 @@ const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 const pineconeService = require('../../pineconeService');
 const { analyzeConversation, buildEpisode } = require('./memoryAnalyzer');
 const { computeEmbedding } = require('../../../utils/memory/memoryUtils');
-const logger = require('../utils/memoryLogger');
 const { isWipeInProgress } = require('../deletion/userMemoryWipeService');
 
 const PROMOTION_VERSION = '1';
@@ -69,7 +68,6 @@ async function promoteUserMemory(userId) {
   }
 
   const promotionStartedAt = Date.now();
-  logger.promotionStart({ userId, status: 'starting', startTime: promotionStartedAt });
   const promotionState = await WorkingMemoryRedis.getPromotionState(userId);
   const lastPromotion = promotionState?.lastPromotion || 0;
   if (lastPromotion && Date.now() - lastPromotion < MIN_PROMOTION_INTERVAL_MS) {
@@ -84,7 +82,6 @@ async function promoteUserMemory(userId) {
 
   const turns = await WorkingMemoryRedis.getRecentMemory(userId);
   if (!turns || turns.length === 0) {
-    logger.promotionQueueStatus({ userId, reason: 'no_recent_turns', status: 'skipped' });
     return { success: true, promoted: false, reason: 'no_recent_turns' };
   }
 
@@ -101,7 +98,6 @@ async function promoteUserMemory(userId) {
   const analysisStartedAt = Date.now();
   const analysis = await analyzeConversation(promotableTurns, userId);
   const analysisDurationMs = Date.now() - analysisStartedAt;
-  logger.memoryAnalyzer({ userId, rule: 'episode_extraction', turnCount: promotableTurns.length, factCount: (analysis.facts || []).length, topicCount: (analysis.topics || []).length, durationMs: analysisDurationMs });
   const episode = buildEpisode(promotableTurns, analysis);
   const episodeId = buildEpisodeId(userId, episode.startTime, episode.endTime);
   const episodeMemory = {
@@ -138,10 +134,8 @@ async function promoteUserMemory(userId) {
   }
 
   const embeddingStartedAt = Date.now();
-  logger.embeddingStart({ userId, episodeId, textLength: String(episodeMemory.embeddingText || '').length });
   const embedding = await computeEmbedding(episodeMemory.embeddingText);
   const embeddingDurationMs = Date.now() - embeddingStartedAt;
-  logger.embeddingResult({ userId, episodeId, durationMs: embeddingDurationMs, vectorLength: Array.isArray(embedding) ? embedding.length : 0, success: Boolean(embedding && Array.isArray(embedding)) });
 
   if (!embedding || !Array.isArray(embedding)) {
     throw new Error('Embedding generation failed for episode promotion');
@@ -150,7 +144,6 @@ async function promoteUserMemory(userId) {
   const pineconeStartedAt = Date.now();
 
   // Log upsert intent with metadata and vector dimension
-  logger.pineconeVerify({ status: 'upsert_intent', id: episodeMemory.id, namespace: episodeMemory.namespace, metadata: episodeMemory.metadata, vectorLength: Array.isArray(embedding) ? embedding.length : 0, host: env.pineconeHost || null });
 
   const pineconeOk = await pineconeService.upsertLongTermVector({
     id: episodeMemory.id,
@@ -159,7 +152,6 @@ async function promoteUserMemory(userId) {
     namespace: episodeMemory.namespace,
   });
   const pineconeDurationMs = Date.now() - pineconeStartedAt;
-  logger.pineconeUpsert({ userId, episodeId, durationMs: pineconeDurationMs, success: Boolean(pineconeOk) });
 
   if (!pineconeOk) {
     throw new Error('Pinecone upsert failed for episode promotion');
@@ -192,7 +184,6 @@ async function promoteUserMemory(userId) {
       memoryType: 'episode',
     });
   } catch (e) {
-    logger.logError('MEMORY_STATS_INIT_ERROR', e, { userId, episodeId });
   }
 
   // Update relationships automatically from entities and relationship facts
@@ -215,10 +206,8 @@ async function promoteUserMemory(userId) {
         boost: 0.06,
       };
       await WorkingMemoryRedis.upsertRelationship(userId, person, relObj);
-      logger.log('RELATIONSHIP_UPDATED', { userId, person, episodeId, importance: relObj.importance });
     }
   } catch (e) {
-    logger.logError('RELATIONSHIP_AUTO_UPDATE_ERROR', e, { userId, episodeId });
   }
 
   await WorkingMemoryRedis.markEpisodePromoted(userId, episodeId);
@@ -227,7 +216,6 @@ async function promoteUserMemory(userId) {
   const compressionRatio = rawConversationSize > 0
     ? Number((compressedEpisodeSize / rawConversationSize).toFixed(3))
     : 0;
-  logger.promotionComplete({ userId, episodeId, durationMs: Date.now() - promotionStartedAt, promotableTurns: promotableTurns.length, compressionRatio, embeddingDurationMs, pineconeDurationMs });
 
   const metrics = {
     queuedUsers: 0,
@@ -244,7 +232,6 @@ async function promoteUserMemory(userId) {
     turnCount: promotableTurns.length,
   };
 
-  logger.promotionMetrics({ userId, ...metrics });
 
   return {
     success: true,

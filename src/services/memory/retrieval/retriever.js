@@ -9,7 +9,6 @@
 const { computeEmbedding } = require('../../../utils/memory/memoryUtils');
 const pineconeService = require('../../pineconeService');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
-const logger = require('../utils/memoryLogger');
 const { env } = require('../../../config/env');
 
 // Default weights (configurable via env)
@@ -57,7 +56,6 @@ function simpleQueryAnalyzer(text) {
 
 async function queryNamespaces({ userId, text, topK = 5 }) {
   const analysis = simpleQueryAnalyzer(text);
-  logger.log('RETRIEVER_ANALYSIS', { userId, analysis });
 
   // Decide namespaces by intent
   const allowedNamespaces = [];
@@ -77,7 +75,6 @@ async function queryNamespaces({ userId, text, topK = 5 }) {
 
   // Remove duplicates and respect configured allowed namespaces
   const uniqueNs = Array.from(new Set(allowedNamespaces)).filter(Boolean);
-  logger.log('RETRIEVER_NAMESPACES', { userId, namespaces: uniqueNs });
 
   // Compute embedding
   const embedding = await computeEmbedding(text);
@@ -92,16 +89,13 @@ async function queryNamespaces({ userId, text, topK = 5 }) {
       if (ns === 'relationships') {
         queryFilter.relationship = { $exists: true };
       }
-      logger.log('RETRIEVER_QUERY_INTENT', { userId, requestedNamespace: ns, queryNamespace: ns, filter: queryFilter, topK, host: env.pineconeHost || null });
       const raw = await pineconeService.queryLongTermVectors({ vector: embedding, topK, filter: queryFilter, namespace: ns });
-      logger.log('RETRIEVER_QUERY_RESULT', { userId, requestedNamespace: ns, queryNamespace: ns, returnedNamespace: ns, returnedCount: Array.isArray(raw) ? raw.length : 0, host: env.pineconeHost || null });
       if (Array.isArray(raw) && raw.length) {
         for (const item of raw) {
           matches.push({ namespace: ns, match: item });
         }
       }
     } catch (err) {
-      logger.logError('RETRIEVER_PINECONE_ERROR', err, { userId, namespace: ns });
     }
   }
 
@@ -120,13 +114,10 @@ async function queryNamespaces({ userId, text, topK = 5 }) {
           }
         }
       }
-      logger.log('RETRIEVER_RELATION_MATCHES', { userId, people: analysis.people, added: matches.length });
     } catch (err) {
-      logger.logError('RETRIEVER_RELATIONSHIP_TRAVERSAL_ERROR', err, { userId, people: analysis.people });
     }
   }
 
-  logger.log('RETRIEVER_RAW_MATCHES', { userId, count: matches.length });
   return { analysis, matches };
 }
 
@@ -220,7 +211,6 @@ async function retrieve({ userId, query, topK = 6 }) {
       }
       scored.push(scoredItem);
     } catch (err) {
-      logger.logError('RETRIEVER_SCORE_ENRICH_ERROR', err, { userId, match: it });
     }
   }
 
@@ -240,17 +230,14 @@ async function retrieve({ userId, query, topK = 6 }) {
   // Sort by finalScore desc
   deduped.sort((a, b) => b.finalScore - a.finalScore);
 
-  logger.log('RETRIEVER_RESULTS', { userId, query: String(query).slice(0, 120), requestedTopK: topK, returned: deduped.length });
   // Reinforcement: slightly increase stats for returned memories
   try {
     for (const r of deduped.slice(0, Math.max(1, Math.floor(topK / 2)))) {
       const memoryId = r.id;
       if (!memoryId) continue;
       await WorkingMemoryRedis.incrementMemoryAccess(memoryId, { accessFrequency: 1, importanceDelta: 0.002, confidenceDelta: 0.001 });
-      logger.log('MEMORY_REINFORCED', { userId, memoryId });
     }
   } catch (e) {
-    logger.logError('RETRIEVER_REINFORCEMENT_ERROR', e, { userId });
   }
   return { analysis, results: deduped };
 }

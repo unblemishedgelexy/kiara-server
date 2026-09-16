@@ -12,7 +12,6 @@
  *   - conversational references ("that", "it", "the project")
  */
 
-const logger = require('./memoryLogger');
 
 // ────────────────────────────────────────────────────────────────────
 // Constants
@@ -347,17 +346,6 @@ function analyzeQuery(text, sessionContext = {}) {
     shouldSearchLongTerm = true;
   }
   
-  logger.log('QUERY_ANALYSIS', {
-    intent,
-    entities: entities.length,
-    keywords: keywords.length,
-    temporalHint,
-    hasConversationalRef: isConversationalRef,
-    shouldSearchSTM: shouldSearchShortTerm,
-    shouldSearchLTM: shouldSearchLongTerm,
-    shouldSearchDeep: shouldSearchDeep,
-    durationMs: Date.now() - startAt,
-  });
   
   return {
     intent,
