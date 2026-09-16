@@ -2,8 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const { GoogleGenAI } = require('@google/genai');
 const { env } = require('../../config/env');
-const logger = require('../memory/utils/memoryLogger');
-const { log: traceLog } = require('../memory/utils/memoryTrace');
 const { isMemoryEligible, markLiveSessionHealth } = require('../memory/memoryStabilityGate');
 const {
   GEMINI_TEXT_MODEL,
@@ -186,15 +184,6 @@ async function executeGeminiRequest({ fn, metadata = {}, endpoint = 'unknown', m
   const traceMeta = buildTraceMetadata({ ...metadata, endpoint });
   const requestId = traceMeta.requestId;
   const start = now();
-  logger.geminiRequest({
-    requestId,
-    ...traceMeta,
-    endpoint,
-    retryCount: 0,
-    status: 'started',
-    concurrency: geminiConcurrency.size,
-    timestamp: new Date().toISOString(),
-  });
 
   if (!hasGeminiServerAccess()) {
     const timestamp = now();
@@ -273,28 +262,6 @@ async function executeGeminiRequest({ fn, metadata = {}, endpoint = 'unknown', m
           concurrency: geminiConcurrency.size,
           timestamp: now(),
         });
-        logger.geminiResponse({
-          requestId,
-          ...traceMeta,
-          endpoint,
-          retryCount: attempt - 1,
-          status: 'OK',
-          promptTokens: usage.promptTokens,
-          responseTokens: usage.responseTokens,
-          latency,
-          concurrency: geminiConcurrency.size,
-        });
-        console.info('[GEMINI_RESPONSE_RECEIVED]', JSON.stringify({
-          requestId,
-          userId: traceMeta.userId,
-          sessionId: traceMeta.sessionId,
-          endpoint,
-          promptTokens: usage.promptTokens,
-          responseTokens: usage.responseTokens,
-          latency,
-          status: 'OK',
-          timestamp: new Date().toISOString(),
-        }));
         return response;
       } catch (err) {
         lastError = err;
@@ -312,16 +279,6 @@ async function executeGeminiRequest({ fn, metadata = {}, endpoint = 'unknown', m
           status,
           concurrency: geminiConcurrency.size,
           timestamp: now(),
-        });
-        logger.geminiResponse({
-          requestId,
-          ...traceMeta,
-          endpoint,
-          retryCount: attempt,
-          status,
-          latency,
-          concurrency: geminiConcurrency.size,
-          error: err.message || String(err),
         });
 
         if (!retryable || attempt >= safeMaxAttempts) {
@@ -378,9 +335,6 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   const sessionId = options.sessionId || requestingUserId || 'anonymous';
   const activeContext = options.activeContext || {};
   const lifecycleTrigger = options.lifecycleTrigger || 'LIVE_SESSION_START';
-  const memoryTraceId = options.memoryTraceId || `memtrace_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-  traceLog('llm_request_context', { memoryTraceId, userId: requestingUserId || 'anonymous', operation: 'live_token_context', lifecycleTrigger, liveSessionId: sessionId, memoryContextCount: 0, categories: [], identityMemoryPresent: false, promptContextSize: 0 });
-  console.info('[GEMINI_REQUEST_STARTED]', JSON.stringify({ operation: 'createLiveEphemeralToken', userId: requestingUserId || 'anonymous', sessionId, question: String(userQuery || '').slice(0, 180), timestamp: new Date().toISOString() }));
   if (!hasGeminiServerAccess()) {
     throw new Error('Gemini API key unavailable');
   }
@@ -412,7 +366,6 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
 
   if (requestingUserId && systemPromptBuilder && memoryGateOpen) {
     try {
-      console.info('[GEMINI_PROMPT_BUILDER_START]', JSON.stringify({ userId: requestingUserId, trigger: 'session_start', timestamp: new Date().toISOString() }));
       const built = await Promise.race([
         systemPromptBuilder.buildSystemPrompt(requestingUserId, {
           tokenBudget: 1800,
@@ -421,7 +374,6 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
           userQuery,
           sessionId,
           activeContext,
-          memoryTraceId,
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('systemPromptBuilder timeout')), PROMPT_BUILDER_TIMEOUT_MS)),
       ]);
@@ -430,28 +382,10 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
         promptBuilderApplied = true;
         memoryRevision = Number(built.memoryRevision) || 0;
         contextMemoryRevision = Number(built.contextMemoryRevision) || memoryRevision;
-        console.info('[GEMINI_CONTEXT_AFTER_INJECTION]', JSON.stringify({
-          userId: requestingUserId,
-          memoryCharacters: built.systemPrompt.length,
-          estimatedTokens: Math.ceil(built.systemPrompt.length / 4),
-          finalInstructionCharacters: dynamicSystemInstruction.length,
-          timestamp: new Date().toISOString(),
-          source: 'geminiService',
-          memoryRevision,
-          contextMemoryRevision,
-        }));
-        try {
-          const preview = String(built.systemPrompt || '').slice(0, 2000);
-          console.log('[GEMINI_FINAL_PROMPT_PREVIEW]', JSON.stringify({ userId: requestingUserId, preview }));
-        } catch (e) {}
-      } else {
-        console.info('[GEMINI_PROMPT_BUILDER_NO_INJECTION]', JSON.stringify({ userId: requestingUserId, timestamp: new Date().toISOString() }));
       }
-    } catch (e) {
-      console.error('[ERROR]', 'Failed to build dynamic system prompt for Gemini:', e && e.message ? e.message : e);
+    } catch {
     }
   } else if (requestingUserId) {
-    console.info('[GEMINI_PROMPT_BUILDER_SKIPPED]', JSON.stringify({ userId: requestingUserId, reason: memoryGateOpen ? 'builder_missing' : 'memory_gate_closed', timestamp: new Date().toISOString() }));
   }
 
   const sessionConfig = createLiveSessionConfig({
@@ -459,27 +393,7 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
     systemInstruction: dynamicSystemInstruction,
     voiceName: env.geminiLiveVoice,
   });
-  traceLog('gemini_request', {
-    memoryTraceId,
-    requestId: `gemini_${Date.now()}`,
-    systemInstruction: String(sessionConfig.systemInstruction || '').slice(0, 2000),
-    memoryContext: String(dynamicSystemInstruction || '').slice(0, 2000),
-    conversationContext: JSON.stringify({ sessionId, userQuery, activeContext }),
-    userMessage: String(userQuery || ''),
-    memoryRevision,
-    contextMemoryRevision,
-    memoryContextDecision: promptBuilderApplied ? 'fresh_canonical_revision' : 'memory_not_injected',
-  });
   const liveConnectConfig = createLiveConnectConfig(sessionConfig);
-  console.info('[GEMINI_SESSION_CONFIG]', JSON.stringify({
-    userId: requestingUserId || 'anonymous',
-    model: sessionConfig.model,
-    responseModalities: sessionConfig.responseModalities,
-    voiceName: sessionConfig.voiceName,
-    systemInstructionLength: String(sessionConfig.systemInstruction || '').length,
-    promptBuilderApplied,
-    timestamp: new Date().toISOString(),
-  }));
 
   const start = now();
   const responsePromise = executeGeminiRequest({
@@ -509,8 +423,6 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   });
 
   const response = await Promise.race([responsePromise, timeoutPromise]);
-  traceLog('llm_response_received', { memoryTraceId, userId: requestingUserId || 'anonymous', operation: 'live_token_context', success: Boolean(response?.name), responseLength: String(response?.name || '').length, memoryContextCount: promptBuilderApplied ? 1 : 0 });
-  traceLog('gemini_response', { memoryTraceId, requestId: `gemini_${Date.now()}`, responseLength: String(response?.name || '').length, model: sessionConfig.model || env.geminiLiveModel || 'unknown' });
 
   if (!response?.name) {
     throw new Error('Failed to create Gemini live ephemeral token.');
@@ -539,7 +451,7 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   };
 }
 
-async function generateText({ prompt, model, temperature = 0.5, candidateCount = 1, maxOutputTokens = 512, userId = null, sessionId = null, memoryTraceId = null, maxAttempts = 3 }) {
+async function generateText({ prompt, model, temperature = 0.5, candidateCount = 1, maxOutputTokens = 512, userId = null, sessionId = null, maxAttempts = 3 }) {
   if (!hasGeminiServerAccess()) {
     throw new Error('Gemini API key is not configured.');
   }
@@ -557,12 +469,11 @@ async function generateText({ prompt, model, temperature = 0.5, candidateCount =
         },
       });
     },
-    metadata: { userId, sessionId, memoryTraceId },
+    metadata: { userId, sessionId },
     endpoint: 'models.generateContent',
     maxAttempts,
   });
 
-  traceLog('final_response_returned', { memoryTraceId, userId, operation: 'generate_text', status: 200, responseLength: String(response.text || '').length, memoryRetrievalStatus: memoryTraceId ? 'correlated' : 'unknown' });
   return {
     text: response.text || '',
     raw: response,

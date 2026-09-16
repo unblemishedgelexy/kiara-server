@@ -1,7 +1,6 @@
 "use strict";
 
 const { env } = require('../../config/env');
-const logger = require('../memory/utils/memoryLogger');
 const DEFAULT_EMBEDDING_MODEL = 'gemini-embedding-2';
 
 function getApiKey() {
@@ -18,22 +17,8 @@ function createGoogleClient() {
     throw new Error('Google API key is not configured. Set GEMINI_API_KEY or GOOGLE_API_KEY.');
   }
 
-  logger && logger.log && logger.log('GOOGLE_PROVIDER_INIT', {
-    provider: 'Google',
-    sdk: '@google/genai',
-    apiKeyLoaded: true,
-    ts: new Date().toISOString(),
-  });
-
   const { GoogleGenAI } = require('@google/genai');
   const client = new GoogleGenAI({ apiKey });
-
-  logger && logger.log && logger.log('GOOGLE_PROVIDER_READY', {
-    provider: 'Google',
-    sdk: '@google/genai',
-    model: getEmbeddingModel(),
-    ts: new Date().toISOString(),
-  });
 
   return client;
 }
@@ -51,12 +36,6 @@ function parseEmbeddingResult(response) {
 
 async function embed(text) {
   const cleaned = String(text || '').trim();
-  logger && logger.log && logger.log('GOOGLE_EMBEDDING_START', {
-    model: getEmbeddingModel(),
-    textLength: cleaned.length,
-    ts: new Date().toISOString(),
-  });
-
   try {
     const client = createGoogleClient();
     const model = getEmbeddingModel();
@@ -64,22 +43,11 @@ async function embed(text) {
     const vector = parseEmbeddingResult(response);
 
     if (!vector) {
-      logger && logger.logError && logger.logError('GOOGLE_EMBEDDING_FAIL', 'Google embedding returned invalid vector', {
-        response: response ? String(response).slice(0, 200) : null,
-      });
       throw new Error('Google embedding returned invalid vector');
     }
 
-    logger && logger.log && logger.log('GOOGLE_EMBEDDING_SUCCESS', {
-      model,
-      vectorLength: vector.length,
-      ts: new Date().toISOString(),
-    });
     return vector;
   } catch (err) {
-    logger && logger.logError && logger.logError('GOOGLE_EMBEDDING_FAIL', err.message || String(err), {
-      stack: err.stack || null,
-    });
     throw err;
   }
 }

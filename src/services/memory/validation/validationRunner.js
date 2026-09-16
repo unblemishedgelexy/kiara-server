@@ -6,7 +6,6 @@ const retriever = require('../retrieval/retriever');
 const promptBuilder = require('../retrieval/promptBuilder');
 const consolidationService = require('../consolidation/consolidationService');
 const redisService = require('../../infrastructure/redisService');
-const logger = require('../utils/memoryLogger');
 
 function nowIso() { return new Date().toISOString(); }
 

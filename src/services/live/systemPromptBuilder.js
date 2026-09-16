@@ -10,8 +10,6 @@
  */
 
 const MemoryService = require('../memory');
-const logger = require('../memory/utils/memoryLogger');
-const { log: traceLog, createMemoryTraceId } = require('../memory/utils/memoryTrace');
 const { isMemoryEligible } = require('../memory/memoryStabilityGate');
 
 module.exports = {
@@ -42,51 +40,16 @@ module.exports = {
     }
 
     if (!isMemoryEligible(userId, sessionId)) {
-      logger.log('MEMORY_GATE_BLOCKED', { userId, sessionId, trigger, reason: 'memory_disabled_until_live_stability' });
       return { systemPrompt: '' };
     }
 
     try {
-      logger.logPromptBuilder(userId, {
-        status: 'started',
-        trigger,
-        charLimit,
-        userQuery: String(userQuery).slice(0, 180),
-        sessionId,
-      });
-      const memoryTraceId = options.memoryTraceId || createMemoryTraceId();
       const result = await MemoryService.prepareContext(userId, {
         charLimit,
         userQuery,
         sessionId,
         activeContext,
-        memoryTraceId,
       });
-      traceLog('memory_composer', {
-        memoryTraceId,
-        workingMemory: [],
-        episodicMemory: [],
-        semanticMemory: [],
-        selectedMemories: Array.isArray(result.facts) ? result.facts.slice(0, 10) : [],
-        discardedMemories: [],
-        selectionReasons: ['live_context_injection'],
-        finalMemoryContext: String(result.systemPrompt || ''),
-        memoryRevision: result.memoryRevision || 0,
-        contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
-      });
-
-      logger.log('STM_INJECT', { userId, trigger, sessionId, systemPromptLength: String(result.systemPrompt || '').length, estimatedTokens: Math.ceil(String(result.systemPrompt || '').length / 4), ts: new Date().toISOString() });
-      logger.log('GEMINI_CONTEXT', { userId, trigger, sessionId, systemPromptLength: String(result.systemPrompt || '').length, estimatedTokens: Math.ceil(String(result.systemPrompt || '').length / 4), ts: new Date().toISOString() });
-      logger.geminiContextInjected(userId, result.systemPrompt.length, Math.ceil(result.systemPrompt.length / 4), trigger);
-      logger.log('LIVE_CONTEXT_INJECTED', {
-        userId,
-        sessionId,
-        trigger,
-        systemPromptLength: String(result.systemPrompt || '').length,
-        contextPacket: !!result.contextPacket,
-        query: String(userQuery || '').slice(0, 180),
-      });
-
       const RESPONSE_GUIDELINES = `
   Response Guidelines (for Kiara's replies):
   - Speak like a natural human friend; never reply like an assistant.
@@ -111,8 +74,7 @@ module.exports = {
         contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
       };
 
-    } catch (err) {
-      console.error('[ERROR]', 'System prompt builder failed:', err && err.message ? err.message : err);
+    } catch {
       return { systemPrompt: '' };
     }
   },

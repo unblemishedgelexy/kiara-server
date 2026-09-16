@@ -8,7 +8,6 @@
  * Enables natural continuation without unnecessary re-explanation.
  */
 
-const logger = require('./memoryLogger');
 
 // ────────────────────────────────────────────────────────────────────
 // In-Memory Tracking
@@ -44,7 +43,6 @@ function initializeSession(userId, sessionId) {
       lastActivityAt: Date.now(),
     });
     
-    logger.log('ANTI_REP_SESSION_START', { userId, sessionId, key });
   } else {
     const session = surfacedMemoriesPerSession.get(key);
     session.lastActivityAt = Date.now();
@@ -57,7 +55,6 @@ function initializeSession(userId, sessionId) {
 function cleanupSession(userId, sessionId) {
   const key = makeSessionKey(userId, sessionId);
   surfacedMemoriesPerSession.delete(key);
-  logger.log('ANTI_REP_SESSION_CLEANUP', { userId, sessionId, key });
 }
 
 /**
@@ -75,7 +72,6 @@ function cleanupExpiredSessions() {
   }
   
   if (cleaned > 0) {
-    logger.log('ANTI_REP_SESSIONS_CLEANED', { count: cleaned });
   }
 }
 
@@ -96,12 +92,6 @@ function recordSurfacedMemory(userId, sessionId, memoryId, memoryData = {}) {
     session.surfaced.add(memoryId);
     session.lastActivityAt = Date.now();
     
-    logger.log('ANTI_REP_RECORDED', {
-      userId,
-      sessionId,
-      memoryId,
-      totalSurfaced: session.surfaced.size,
-    });
   }
 }
 
@@ -156,13 +146,6 @@ function filterOutSurfacedMemories(memories, userId, sessionId) {
     return !session.surfaced.has(memId);
   });
   
-  logger.log('ANTI_REP_FILTERED', {
-    userId,
-    sessionId,
-    originalCount: memories.length,
-    filteredCount: filtered.length,
-    excluded: memories.length - filtered.length,
-  });
   
   return filtered;
 }
@@ -186,12 +169,6 @@ function markMemoriesPresented(userId, sessionId, memoryIds) {
     }
     session.lastActivityAt = Date.now();
     
-    logger.log('ANTI_REP_MARKED_PRESENTED', {
-      userId,
-      sessionId,
-      count: memoryIds.length,
-      totalSurfaced: session.surfaced.size,
-    });
   }
 }
 
@@ -204,7 +181,6 @@ function clearSurfacedMemories(userId, sessionId) {
   
   if (session) {
     session.surfaced.clear();
-    logger.log('ANTI_REP_CLEARED', { userId, sessionId, key });
   }
 }
 

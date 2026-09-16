@@ -8,7 +8,6 @@
  * Implements compression and truncation strategies.
  */
 
-const logger = require('./memoryLogger');
 
 // ────────────────────────────────────────────────────────────────────
 // Budget Configuration
@@ -202,13 +201,6 @@ function buildBudgetedContext(contextData, budgets = {}) {
   const finalContext = sections.join('\n\n').trim();
   const durationMs = Date.now() - startTime;
   
-  logger.log('CONTEXT_BUDGET', {
-    totalTokens,
-    budgetTokens: finalBudgets.TOTAL_CONTEXT_TOKENS,
-    budgetUsagePercent: Math.round((totalTokens / finalBudgets.TOTAL_CONTEXT_TOKENS) * 100),
-    sectionCount: sections.length,
-    durationMs,
-  });
   
   return {
     context: finalContext,
@@ -255,11 +247,6 @@ function truncateContext(context, maxTokens = DEFAULT_BUDGETS.TOTAL_CONTEXT_TOKE
     result = result.slice(0, lastNewline);
   }
   
-  logger.log('CONTEXT_TRUNCATED', {
-    originalTokens: tokens,
-    truncatedTokens: estimateTokens(result),
-    maxTokens,
-  });
   
   return result;
 }

@@ -8,7 +8,6 @@
  */
 
 const memoryIdentity = require('./memoryIdentity');
-const logger = require('./memoryLogger');
 
 // ────────────────────────────────────────────────────────────────────
 // Deduplication Logic
@@ -34,11 +33,6 @@ function checkForDuplicates(candidate, existingMemories, options = {}) {
   const candidateId = memoryIdentity.generateMemoryIdentity(candidate);
   const candidateFp = memoryIdentity.generateFingerprint(candidate.content || candidate.value || '');
   
-  logger.log('DEDUP_CHECK_START', {
-    candidateId,
-    candidateFp: candidateFp.slice(0, 16),
-    existingCount: existingMemories.length,
-  });
   
   for (const existing of existingMemories) {
     // Skip inactive/obsolete memories
@@ -53,11 +47,6 @@ function checkForDuplicates(candidate, existingMemories, options = {}) {
     if (candidateId && existingId) {
       const similarity = memoryIdentity.calculateIdentitySimilarity(candidateId, existingId);
       if (similarity >= IDENTITY_SIMILARITY_THRESHOLD) {
-        logger.log('DEDUP_MATCH_IDENTITY', {
-          candidateId,
-          existingId,
-          similarity,
-        });
         return {
           isDuplicate: true,
           matchedId: existing.id || existing._id || existing.memoryId,
@@ -69,12 +58,6 @@ function checkForDuplicates(candidate, existingMemories, options = {}) {
     
     // 2. Content fingerprint match (confirms semantic similarity)
     if (candidateFp && existingFp && memoryIdentity.fingerprintsMatch(candidateFp, existingFp)) {
-      logger.log('DEDUP_MATCH_FINGERPRINT', {
-        candidateId,
-        existingId,
-        candidateFp: candidateFp.slice(0, 16),
-        existingFp: existingFp.slice(0, 16),
-      });
       return {
         isDuplicate: true,
         matchedId: existing.id || existing._id || existing.memoryId,
@@ -88,10 +71,6 @@ function checkForDuplicates(candidate, existingMemories, options = {}) {
     const existingText = String(existing.content || existing.value || existing.summary || '').toLowerCase().slice(0, 200);
     
     if (candidateText && existingText && candidateText === existingText) {
-      logger.log('DEDUP_MATCH_TEXT', {
-        candidateId,
-        existingId,
-      });
       return {
         isDuplicate: true,
         matchedId: existing.id || existing._id || existing.memoryId,
@@ -101,7 +80,6 @@ function checkForDuplicates(candidate, existingMemories, options = {}) {
     }
   }
   
-  logger.log('DEDUP_NO_MATCH', { candidateId, candidateFp: candidateFp.slice(0, 16) });
   return { isDuplicate: false, matchedId: null, matchType: null };
 }
 
@@ -178,11 +156,6 @@ function deduplicateMemoryList(memories) {
     }
   }
   
-  logger.log('MEMORY_DEDUP_FILTERED', {
-    originalCount: memories.length,
-    deduplicatedCount: result.length,
-    duplicatesRemoved: memories.length - result.length,
-  });
   
   return result;
 }

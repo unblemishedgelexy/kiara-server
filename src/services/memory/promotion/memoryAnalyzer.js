@@ -1,7 +1,6 @@
 'use strict';
 
 const { createHash } = require('crypto');
-const logger = require('../utils/memoryLogger');
 
 const FACT_PATTERNS = [
   {
@@ -406,13 +405,11 @@ async function analyzeConversation(turns, userId = 'unknown') {
 
   const transcript = transcriptEntries.map((e) => `TURN_ID:${e.id}\nUSER:${e.user}\nASSISTANT:${e.assistant}`).join('\n\n');
 
-  logger.memoryAnalyzer({ userId, rule: 'ai_extraction', status: 'conversation_received', turnCount: turns.length, transcriptLength: String(transcript).length });
 
   // If Gemini API key is missing, return empty set (do not fabricate)
   const { GEMINI_TEXT_MODEL } = require('../../../config/constants');
   const { env } = require('../../../config/env');
   if (!env.geminiApiKey && !process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY) {
-    logger.memoryAnalyzer({ userId, rule: 'ai_extraction', status: 'gemini_unavailable', reason: 'no_api_key' });
     return {
       facts: [],
       semanticMemories: groupSemanticMemories([]),
@@ -464,7 +461,6 @@ async function analyzeConversation(turns, userId = 'unknown') {
     });
 
     const raw = (response && (response.text || response.outputText || response.output?.[0]?.content || response.data?.[0]?.content)) || response?.text || '';
-    logger.memoryAnalyzer({ userId, rule: 'ai_extraction', status: 'raw_response', length: String(raw || '').length, rawPreview: String(raw || '').slice(0, 800) });
 
     function stripCodeFences(text) {
       let value = String(text || '').trim();
@@ -540,14 +536,12 @@ async function analyzeConversation(turns, userId = 'unknown') {
     if (!parsed || !Array.isArray(parsed.memories)) {
       const cleanedCandidate = stripCodeFences(raw).slice(0, 1400);
       const extractedCandidate = extractJsonObject(raw) || '';
-      logger.memoryAnalyzer({ userId, rule: 'ai_extraction', status: 'parse_failed', reason: 'invalid_json', rawPreview: String(raw || '').slice(0, 1200), cleanedCandidate, extractedCandidate: String(extractedCandidate).slice(0, 1200) });
 
       const fallbackFacts = buildFallbackFacts(transcript, userId);
       if (fallbackFacts.length) {
         const groupedFallback = groupSemanticMemories(fallbackFacts);
         const categoryCounts = {};
         fallbackFacts.forEach((a) => { categoryCounts[a.category] = (categoryCounts[a.category] || 0) + 1; });
-        logger.memoryAnalyzer({ userId, rule: 'ai_extraction', status: 'fallback_extracted', extractedCount: fallbackFacts.length, categoryCounts, confidenceDistribution: fallbackFacts.map((a) => Number(a.confidenceScore || 0)).slice(0, 50) });
         return {
           facts: fallbackFacts,
           semanticMemories: groupedFallback,
@@ -614,7 +608,6 @@ async function analyzeConversation(turns, userId = 'unknown') {
     const categoryCounts = {};
     accepted.forEach((a) => { categoryCounts[a.category] = (categoryCounts[a.category] || 0) + 1; });
     const confidenceDist = accepted.map((a) => Number(a.confidence || 0));
-    logger.memoryAnalyzer({ userId, rule: 'ai_extraction', status: 'extracted', extractedCount: accepted.length, rejectedCount: rejected.length, categoryCounts, confidenceDistribution: confidenceDist.slice(0, 50) });
 
     // Map memories to facts compatible shape with normalized categories
     const categoryNormalizer = {
@@ -652,7 +645,6 @@ async function analyzeConversation(turns, userId = 'unknown') {
     const grouped = groupSemanticMemories(facts);
 
     // Final promotion payload log
-    logger.memoryAnalyzer({ userId, rule: 'ai_extraction', status: 'final_payload', finalCounts: Object.fromEntries(Object.entries(grouped).map(([k, v]) => [k, v.length])), sample: facts.slice(0, 6) });
 
     return {
       facts,
@@ -662,7 +654,6 @@ async function analyzeConversation(turns, userId = 'unknown') {
       decisions: parsed.summary ? extractDecisions(parsed.summary) : extractDecisions(transcript),
     };
   } catch (err) {
-    logger.memoryAnalyzer({ userId, rule: 'ai_extraction', status: 'error', error: err && err.message ? err.message : String(err) });
     return {
       facts: [],
       semanticMemories: groupSemanticMemories([]),

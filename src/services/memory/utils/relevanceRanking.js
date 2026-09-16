@@ -15,7 +15,6 @@
  *   - conversation continuity (is this related to current topic?)
  */
 
-const logger = require('./memoryLogger');
 
 // ────────────────────────────────────────────────────────────────────
 // Scoring Functions
@@ -281,12 +280,6 @@ function rankMemories(memories, query, weights = {}) {
   scored.sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0));
   
   const durationMs = Date.now() - startAt;
-  logger.log('MEMORY_RANKING', {
-    inputCount: memories.length,
-    outputCount: scored.length,
-    topScore: scored[0]?.relevanceScore || 0,
-    durationMs,
-  });
   
   return scored;
 }

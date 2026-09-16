@@ -1,7 +1,6 @@
 'use strict';
 
 const { generateText } = require('../live/geminiService');
-const { log: traceLog } = require('./utils/memoryTrace');
 
 const SUPPORTED_CATEGORIES = new Set(['identity', 'preference', 'goal', 'fact', 'skill', 'project', 'relationship']);
 const inFlightUnderstanding = new Map();
@@ -65,12 +64,12 @@ function normalizeResult(result, sourceTurnId, sourceRole = 'user') {
   return grouped;
 }
 
-async function understandUserMemory(text, { userId = null, memoryTraceId = null, sourceTurnId = null } = {}) {
+async function understandUserMemory(text, { userId = null, sourceTurnId = null } = {}) {
   const requestKey = `${userId || 'anonymous'}:${String(text || '').trim()}`;
   const existingRequest = inFlightUnderstanding.get(requestKey);
   if (existingRequest) return existingRequest;
 
-  const request = understandUserMemoryInternal(text, { userId, memoryTraceId, sourceTurnId });
+  const request = understandUserMemoryInternal(text, { userId, sourceTurnId });
   inFlightUnderstanding.set(requestKey, request);
   try {
     return await request;
@@ -79,20 +78,18 @@ async function understandUserMemory(text, { userId = null, memoryTraceId = null,
   }
 }
 
-async function understandUserMemoryInternal(text, { userId = null, memoryTraceId = null, sourceTurnId = null } = {}) {
+async function understandUserMemoryInternal(text, { userId = null, sourceTurnId = null } = {}) {
   const prompt = `Classify the meaning of this user utterance for a persistent memory system. Understand any language or code-switching; do not use word matching. Return JSON only: {"memories":[]} or {"memories":[...]}.
 Each memory must contain category (identity, preference, goal, fact, skill, project, relationship), attribute, value, intent, memoryWorthy, userAssertion, correction, uncertainty, confidence.
 Only emit a memory for a clear user-originated factual assertion or correction. Questions, requests, greetings, filler, hypotheses, jokes, uncertainty, and conversational references must emit no memory. Assistant text is never input to this function.
 Utterance: ${String(text).slice(0, 1200)}`;
 
   try {
-    const response = await generateText({ prompt, userId, memoryTraceId, maxOutputTokens: 700, temperature: 0, candidateCount: 1, maxAttempts: 1 });
+    const response = await generateText({ prompt, userId, maxOutputTokens: 700, temperature: 0, candidateCount: 1, maxAttempts: 1 });
     const parsed = parseJson(response.text);
     const normalized = normalizeResult(parsed, sourceTurnId, 'user');
-    traceLog('semantic_understanding_result', { memoryTraceId, userId, operation: 'user_memory_understanding', memoryCount: Object.values(normalized).flat().length, categories: Object.keys(normalized), status: 'completed' });
     return normalized;
   } catch (error) {
-    traceLog('semantic_understanding_result', { memoryTraceId, userId, operation: 'user_memory_understanding', memoryCount: 0, status: 'unavailable', reason: error.message || String(error) });
     return null;
   }
 }

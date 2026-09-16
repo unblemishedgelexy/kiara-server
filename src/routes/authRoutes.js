@@ -78,6 +78,7 @@ const resetPasswordSchema = Joi.object({
 // Authentication endpoints - all using standard authController
 router.post('/register', validateRequest(registerSchema), authController.register);
 router.post('/login', validateRequest(loginSchema), authController.login);
+router.post('/dev-session', authController.createLocalDevelopmentSession);
 router.get('/google/url', validateRequest(Joi.object({ query: Joi.object({ redirectUri: Joi.string().required() }).unknown(true) })), authController.getGoogleAuthUrl);
 router.get('/google/callback', authController.handleGoogleCallback);
 router.post('/send-otp', validateRequest(sendOtpSchema), authController.sendOtp);

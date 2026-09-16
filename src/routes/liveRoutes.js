@@ -2,19 +2,23 @@ const express = require('express');
 const { createLiveEphemeralToken } = require('../services/../services/live/liveTokenService');
 const { env } = require('../config/env');
 const authMiddleware = require('../middleware/authMiddleware');
-const { log: traceLog } = require('../services/memory/utils/memoryTrace');
 
 const router = express.Router();
 const geminiHealth = require('../services/../services/live/geminiHealth');
 
 router.get('/health', async (_req, res) => {
   const health = await geminiHealth.checkOnce();
+  const geminiConfigured = Boolean(env.geminiApiKey);
+  const geminiAvailable = Boolean(health.available);
+  const offlineMode = !geminiConfigured || !geminiAvailable;
+
   res.json({
     elevenLabsConfigured: Boolean(env.elevenLabsApiKey && env.elevenLabsVoiceId),
-    geminiConfigured: Boolean(env.geminiApiKey),
-    geminiAvailable: Boolean(health.available),
+    geminiConfigured,
+    geminiAvailable,
     geminiLastError: health.lastError,
-    ok: Boolean(env.geminiApiKey) && Boolean(health.available),
+    offlineMode,
+    ok: true,
   });
 });
 
@@ -29,30 +33,25 @@ router.post('/health/check', async (_req, res) => {
 
 router.post('/token', authMiddleware.optional, async (req, res) => {
   if (!env.geminiApiKey) {
-    res.status(503).json({ error: 'Gemini API key is not configured.' });
+    res.status(200).json({
+      offlineMode: true,
+      mode: 'offline',
+      message: 'Kiara is running in offline mode and cannot create a live Gemini token right now.',
+      token: null,
+      expireTime: null,
+      newSessionExpireTime: null,
+      sessionConfig: null,
+    });
     return;
   }
 
-  const requestStartedAt = Date.now();
   const userId = req.userId || null;
   const requestBody = req.body || {};
   const userQuery = typeof requestBody.userQuery === 'string' ? requestBody.userQuery : '';
   const sessionId = typeof requestBody.sessionId === 'string' ? requestBody.sessionId : userId || 'anonymous';
   const activeContext = requestBody.activeContext && typeof requestBody.activeContext === 'object' ? requestBody.activeContext : {};
-  const memoryTraceId = req.memoryTraceId;
-  traceLog('llm_endpoint_received', { traceId: memoryTraceId, requestId: req.requestId, userId: userId || 'anonymous', endpoint: '/api/live/token', method: req.method, operation: 'live_token' });
-
-  console.info('[LIVE_TOKEN_ROUTE]', {
-    userId: userId || 'anonymous',
-    sessionId,
-    question: String(userQuery || '').slice(0, 180),
-    method: req.method,
-    path: req.path,
-    timestamp: new Date().toISOString(),
-  });
-
   try {
-    const token = await createLiveEphemeralToken(userId, { userQuery, sessionId, activeContext, memoryTraceId, lifecycleTrigger: req.lifecycleTrigger || 'LIVE_SESSION_START' });
+    const token = await createLiveEphemeralToken(userId, { userQuery, sessionId, activeContext, lifecycleTrigger: req.lifecycleTrigger || 'LIVE_SESSION_START' });
 
     if (!token || typeof token.token !== 'string' || !token.token.trim()) {
       console.error('[ERROR]', 'Live token generation returned invalid token data.');
@@ -67,14 +66,6 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
       sessionConfig: token.sessionConfig,
     };
 
-    console.info('[LIVE_TOKEN_ROUTE_RESPONSE]', {
-      userId: userId || 'anonymous',
-      durationMs: Date.now() - requestStartedAt,
-      sessionConfigModel: token.sessionConfig?.model || 'unknown',
-      responseModalities: token.sessionConfig?.responseModalities || 'unknown',
-      timestamp: new Date().toISOString(),
-    });
-    traceLog('final_response_returned', { traceId: memoryTraceId, userId: userId || 'anonymous', operation: 'live_token', status: 200, memoryRetrievalStatus: 'included_in_prompt_builder', totalPipelineDurationMs: Date.now() - requestStartedAt });
     res.status(200).json(payload);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

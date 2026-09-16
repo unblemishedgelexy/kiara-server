@@ -83,6 +83,7 @@ const env = {
   aesSecret: readEnv('AES_SECRET', 'aes-secret-32-bytes-length!!'),
   mongoUri: readEnv('MONGODB_URI', 'mongodb://127.0.0.1:27017/kiara_ai'),
   nodeEnv,
+  localDevAuthEnabled: nodeEnv === 'development' && readEnv('LOCAL_DEV_AUTH_ENABLED', 'false').toLowerCase() === 'true',
   port: readNumber('PORT', 4000),
   // Redis Configuration for Short-term Memory
   redisHost: readEnv('REDIS_HOST', 'localhost'),

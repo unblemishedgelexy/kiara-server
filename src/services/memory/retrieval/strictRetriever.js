@@ -8,7 +8,6 @@
  */
 
 const retriever = require('./retriever');
-const logger = require('../utils/memoryLogger');
 
 async function searchStrict(userId, query, maxResults = 3) {
   if (!userId || !query || !String(query).trim()) return [];
@@ -17,7 +16,6 @@ async function searchStrict(userId, query, maxResults = 3) {
     const { analysis, results } = await retriever.retrieve({ userId, query, topK: 8 });
 
     if (!Array.isArray(results) || results.length === 0) {
-      logger.log('STRICT_RETRIEVER', { userId, query: String(query).slice(0, 120), returned: 0 });
       return [];
     }
 
@@ -48,10 +46,8 @@ async function searchStrict(userId, query, maxResults = 3) {
     // Format as simple bullet lines for injection
     const bullets = chosen.map((c) => `• ${c.text}`);
 
-    logger.log('STRICT_RETRIEVER', { userId, query: String(query).slice(0, 120), returned: bullets.length, ts: new Date().toISOString() });
     return bullets;
   } catch (err) {
-    logger.logError('STRICT_RETRIEVER_ERROR', err, { userId, query: String(query).slice(0, 120) });
     return [];
   }
 }
