@@ -92,8 +92,7 @@ This reference path is important because names such as V6, LongTermMemory, and M
 | DEFINITELY ACTIVE | `Kiara-ai/src/ai/conversationMemory.ts` | Imported by connection/runtime code; remote-first persistence with IndexedDB fallback. |
 | DEFINITELY ACTIVE | `Kiara-ai/src/ai/conversationRuntime.ts` | Imported by Live connection/runtime code; flushes user and assistant transcripts into conversation memory. |
 | DEFINITELY ACTIVE | `Kiara-ai/src/ai/realtimeMemory.ts` | Imported by `useRealtimeAI`; coordinates memory preload, priming, and persistence. |
-| DEFINITELY ACTIVE | `Kiara-ai/src/ai/connectionManager.ts` | Imports and calls `saveConversationTurn()` as part of the Live connection path. |
-| DEFINITELY ACTIVE | `Kiara-ai/src/services/bootstrapEngine.ts` | Calls `/api/working-memory/context` during frontend context/bootstrap behavior. |
+| DEFINITELY ACTIVE | `Kiara-ai/src/components/context/hooks/useRealtimeAI.ts` | Owns the active Live connection path and persists completed turns through `realtimeMemory.ts`. |
 | DEFINITELY ACTIVE | `Kiara-ai/src/services/KiaraMemoryService.ts` | Imported by `useAutonomousIdentity`, `useKiaraMemory`, and `KiaraIdentityService`; it is a separate localStorage memory implementation, not an unused file. |
 | DEFINITELY ACTIVE | `Kiara-ai/src/components/context/hooks/useKiaraMemory.ts` | Imports `KiaraMemoryService`; used by `KiaraMemoryPanel`. |
 | DEFINITELY ACTIVE | `Kiara-ai/src/components/context/hooks/useAutonomousIdentity.ts` | Imports `KiaraMemoryService`; used by `HomePage`. |

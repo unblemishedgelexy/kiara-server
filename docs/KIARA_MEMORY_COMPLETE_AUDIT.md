@@ -194,9 +194,8 @@ The following inventory covers the active memory path and indirect callers in th
 | [kiara-server/src/services/live/geminiService.js](kiara-server/src/services/live/geminiService.js) | Gemini text/live calls, timeout/circuit breaker | Gemini integration | Prompt/context | External API/trace | Live routes/services | Gemini | request execution and token creation | Active; memory injection is optional and separately timed |
 | [Kiara-ai/src/ai/conversationMemory.ts](Kiara-ai/src/ai/conversationMemory.ts) | Remote-first paired-turn persistence with IndexedDB fallback | Frontend persistence | Remote snapshot, local DB | Backend pair or local IndexedDB | Runtime/connection manager | Backend/IndexedDB | `saveConversationTurn`, `loadConversationSnapshot` | Active; user-only save is local fallback |
 | [Kiara-ai/src/api/backendRealtime.ts](Kiara-ai/src/api/backendRealtime.ts) | Holds pending user turn and posts pair | Frontend API | Auth/user/session | `/api/working-memory/save` | `conversationMemory` | Backend | `persistRemoteMemoryTurn` | Active; assistant is required to complete pair |
-| [Kiara-ai/src/ai/connectionManager.ts](Kiara-ai/src/ai/connectionManager.ts) | Flushes complete Live turn at turn completion | Frontend Live | Live transcripts | Calls conversation memory | Live runtime | Backend/local fallback | `saveTurnIfNeeded` | Active; incomplete transcripts are discarded/reset |
+| [Kiara-ai/src/components/context/hooks/useRealtimeAI.ts](../Kiara-ai/src/components/context/hooks/useRealtimeAI.ts) | Flushes complete Live turn at turn completion | Frontend Live | Live transcripts | Calls realtime memory persistence | Live runtime | Backend/local fallback | `persistConversationMemory` | Active; incomplete transcripts are discarded/reset |
 | [Kiara-ai/src/ai/conversationRuntime.ts](Kiara-ai/src/ai/conversationRuntime.ts) | Buffers/flushes transcript roles | Frontend Live | Live transcript | Remote/local memory | Connection manager | Backend/local | `flushPendingUserMemory`, `flushAssistantMemory` | Active; user and assistant flushes are separate |
-| [Kiara-ai/src/services/bootstrapEngine.ts](Kiara-ai/src/services/bootstrapEngine.ts) | Fetches working context and builds seed prompt | Frontend context | `/working-memory/context` | Gemini session message through caller | Session setup | Backend | `fetchBootstrap`, `buildSeedPrompt` | Active but backend endpoint returns raw STM context, not semantic summaries |
 | [kiara-server/test-e2e-complete.js](kiara-server/test-e2e-complete.js) | HTTP identity/working-memory scenario | Test | HTTP backend | Test data | Manual | Redis/Mongo via server | STORE/RECALL tests | Not verified in this audit |
 | [kiara-server/test-memory-direct.js](kiara-server/test-memory-direct.js) | Direct unauthenticated Roshan test | Test | HTTP backend | Test data | Manual | Redis/Mongo via server | identity save/context | Not verified; request lacks auth |
 | [kiara-server/test-verification.js](kiara-server/test-verification.js) | Semantic-vs-working identity contamination scenario | Test | HTTP backend | Test data | Manual | Redis/Mongo via server | Roshan/Abhi scenario | Not verified in this audit |
@@ -433,7 +432,7 @@ There are two active-looking composition paths:
 1. `MemoryService.prepareContext()` uses the intelligent orchestrator and returns `result.context`, which is primarily the selected-memory compressed text.
 2. `_assembleContext()` uses `promptBuilder.buildContext()` with explicit identity/relationship/goal/project/preference/facts/episodes sections, but this path is not what `prepareContext()` calls.
 
-The direct `/api/working-memory/context` compatibility endpoint uses `buildWorkingMemoryContext()` and returns raw formatted recent turns only. The frontend `bootstrapEngine` calls this endpoint and truncates it to 500 characters. It does not receive the semantic Redis hash directly.
+The direct `/api/working-memory/context` compatibility endpoint uses `buildWorkingMemoryContext()` and returns raw formatted recent turns only. The active frontend `backendRealtime.ts` snapshot path consumes this endpoint; it does not receive the semantic Redis hash directly.
 
 `promptBuilder` has explicit sections for identity, relationships, goal, active project, preferences, long-term facts, relevant episodes, and recent STM. The current Live route may bypass most of those explicit sections in favor of orchestrator `compressedContext`.
 
@@ -903,7 +902,7 @@ No source fix was implemented in this audit. The first engineering priority shou
 - `ConversationTurn.create` in `WorkingMemoryRedis.saveConversationTurn`
 - `persistRemoteMemoryTurn` in `Kiara-ai/src/api/backendRealtime.ts`
 - `saveConversationTurn` in `Kiara-ai/src/ai/conversationMemory.ts`
-- `saveTurnIfNeeded` in `Kiara-ai/src/ai/connectionManager.ts`
+- `persistConversationMemory` in `Kiara-ai/src/ai/realtimeMemory.ts`, called by `useRealtimeAI`
 - `persistConversationMemory` in `Kiara-ai/src/ai/realtimeMemory.ts`
 
 ### Relevant absent/stale architecture references

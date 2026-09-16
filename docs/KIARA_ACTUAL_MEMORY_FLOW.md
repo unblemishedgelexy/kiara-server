@@ -437,7 +437,7 @@ The first is on the normal save request. The second is optional, delayed, worker
 
 ## 3.7 Bootstrap path
 
-**SOURCE:** `Kiara-ai/src/services/bootstrapEngine.ts`.
+**SOURCE:** `Kiara-ai/src/api/backendRealtime.ts` and the active `useRealtimeAI` path.
 
 **FUNCTION:** `fetchBootstrap()`/context fetch functions call `/api/working-memory/context`.
 
@@ -582,7 +582,7 @@ The standalone retriever itself selects namespaces as follows:
 
 **Primary path:** `geminiService.createLiveEphemeralToken()` -> `systemPromptBuilder.buildSystemPrompt()` -> `MemoryService.prepareContext()` -> orchestrator result `context` -> `dynamicSystemInstruction` -> `createLiveSessionConfig()` -> Gemini Live token/session configuration.
 
-**Important parallel context endpoint:** `GET /api/working-memory/context` -> controller -> `MemoryService.buildWorkingMemoryContext()` is also read by `Kiara-ai/src/api/backendRealtime.ts::fetchMemorySnapshot()` and `bootstrapEngine.ts`. This endpoint is an active frontend snapshot/context path, but it is not the direct Gemini token injection owner.
+**Important parallel context endpoint:** `GET /api/working-memory/context` -> controller -> `MemoryService.buildWorkingMemoryContext()` is read by `Kiara-ai/src/api/backendRealtime.ts::fetchMemorySnapshot()` in the active realtime memory path. This endpoint is an active frontend snapshot/context path, but it is not the direct Gemini token injection owner.
 
 ---
 
@@ -599,7 +599,6 @@ The standalone retriever itself selects namespaces as follows:
 | `kiara-server/src/services/live/geminiService.js` | `createLiveEphemeralToken()` | `liveTokenService` -> `liveRoutes` | User/session/query/activeContext | Gemini Live token/session config with system instruction | YES | No | Final prompt injection owner |
 | `Kiara-ai/src/ai/conversationMemory.ts` | `buildMemoryContext()` | No caller found in current searched frontend code | Local snapshot/turns | Always `''` | No demonstrated Live effect | No | Legacy/no-op frontend context API |
 | `Kiara-ai/src/ai/conversationMemory.ts` | `primeSessionMemory()` | No active caller found; `realtimeMemory` calls `primeConversationMemory`, not this symbol | Session/context | No output | No demonstrated Live effect | No | Legacy/no-op frontend prompt API |
-| `Kiara-ai/src/services/bootstrapEngine.ts` | `fetchBootstrap()` and context fetch functions | Frontend bootstrap callers | Working-memory context endpoint | Backend snapshot/context response | Indirectly active frontend read | No | Bootstrap consumer, not final Gemini prompt builder |
 | `Kiara-ai/src/services/KiaraMemoryService.ts` | `formatMemoryEntry()`, `retrieveRelevantMemories()` | Frontend hooks/services | LocalStorage memory | Local memory entries/strings | No path to backend Live prompt found | No | Parallel local cache/memory system |
 | `kiara-server/archive/v6/systemPromptBuilderV6.js` | `buildV6SystemPrompt()` | No current caller; archive-only | Archived services/user/session | V6 prompt object | No | No | Legacy/archive; old prompt builder |
 
