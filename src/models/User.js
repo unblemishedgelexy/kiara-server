@@ -43,8 +43,13 @@ const userSchema = new mongoose.Schema(
     // Two-factor authentication (future feature)
     twoFactorEnabled: { type: Boolean, default: false },
   },
-  { timestamps: true }
+  { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
+
+userSchema.virtual('fullName').get(function getFullName() {
+  const nameFromParts = [this.firstName, this.lastName].filter(Boolean).join(' ').trim();
+  return nameFromParts || this.displayName || '';
+});
 
 // Indexes for performance and uniqueness
 userSchema.index({ createdAt: -1 });

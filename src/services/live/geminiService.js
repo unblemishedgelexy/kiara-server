@@ -382,10 +382,28 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
         promptBuilderApplied = true;
         memoryRevision = Number(built.memoryRevision) || 0;
         contextMemoryRevision = Number(built.contextMemoryRevision) || memoryRevision;
+
+        console.info('[KIARA_SESSION_CONTEXT]', JSON.stringify({
+          userId: requestingUserId,
+          sessionId,
+          lifecycleTrigger,
+          promptBuilderApplied: true,
+          userFullNamePresent: Boolean(built.userFullNamePresent),
+          userFullNameLength: built.userFullName ? String(built.userFullName).length : 0,
+          systemInstructionLength: dynamicSystemInstruction.length,
+        }));
       }
     } catch {
     }
   } else if (requestingUserId) {
+    console.info('[KIARA_SESSION_CONTEXT]', JSON.stringify({
+      userId: requestingUserId,
+      sessionId,
+      lifecycleTrigger,
+      promptBuilderApplied: false,
+      reason: 'memory_gate_closed',
+      systemInstructionLength: dynamicSystemInstruction.length,
+    }));
   }
 
   const sessionConfig = createLiveSessionConfig({
