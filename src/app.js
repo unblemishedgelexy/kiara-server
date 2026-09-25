@@ -36,11 +36,12 @@ const createApp = () => {
       "Content-Type",
       "X-App-Version",
       "X-Client-Platform",
+      "X-Kiara-Trace-Id",
       "X-Memory-Trace-Id",
       "X-Request-Id",
       "X-Kiara-Trigger",
       "X-Requested-With",
-      "X-Refresh-Token", // ✅ Add this
+      "X-Refresh-Token",
     ],
     exposedHeaders: [
       "X-Memory-Trace-Id",

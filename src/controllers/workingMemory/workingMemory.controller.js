@@ -76,6 +76,8 @@ const WorkingMemoryController = {
    * GET /api/working-memory/context?userId=...&limit=...
    */
   async getMemoryContext(req, res) {
+    const requestStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const traceId = req.headers['x-kiara-trace-id'] || req.headers['X-Kiara-Trace-Id'] || `memctx-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     try {
       const { userId, limit, userQuery } = req.query;
       const result = userQuery
@@ -84,8 +86,14 @@ const WorkingMemoryController = {
           sessionId: req.query.sessionId || userId,
         })
         : await MemoryService.buildWorkingMemoryContext(userId, '', '', parseInt(limit) || 20);
+      if (process.env.NODE_ENV === 'development' || process.env.KIARA_LATENCY_DEBUG === 'true') {
+        console.info('[KIARA_LATENCY_BACKEND]', JSON.stringify({ traceId, route: '/api/working-memory/context', stage: 'response_sent', ms: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - requestStartedAt) }));
+      }
       return res.status(200).json(result);
     } catch (err) {
+      if (process.env.NODE_ENV === 'development' || process.env.KIARA_LATENCY_DEBUG === 'true') {
+        console.info('[KIARA_LATENCY_BACKEND]', JSON.stringify({ traceId, route: '/api/working-memory/context', stage: 'request_failed', ms: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - requestStartedAt) }));
+      }
       return res.status(500).json({ success: false, error: err.message, code: err.code });
     }
   },

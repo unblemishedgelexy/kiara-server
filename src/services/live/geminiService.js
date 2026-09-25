@@ -6,6 +6,7 @@ const { isMemoryEligible, markLiveSessionHealth } = require('../memory/memorySta
 const {
   GEMINI_TEXT_MODEL,
   GEMINI_LIVE_SYSTEM_INSTRUCTION,
+  buildGeminiLiveSystemInstruction,
 } = require('../../config/constants');
 const {
   createLiveConnectConfig,
@@ -27,6 +28,16 @@ const CIRCUIT_BREAKER_WINDOW_MS = 60 * 1000;
 const CIRCUIT_BREAKER_THRESHOLD = 6;
 const CIRCUIT_BREAKER_COOLDOWN_MS = 120 * 1000;
 const PROMPT_BUILDER_TIMEOUT_MS = 3000;
+const SYSTEM_PROMPT_CACHE_TTL_MS = 15000;
+const systemPromptCache = new Map();
+
+function createPromptCacheKey(userId, sessionId, userQuery, activeContext) {
+  const normalizedQuery = String(userQuery || '').trim();
+  const normalizedContext = activeContext && typeof activeContext === 'object'
+    ? JSON.stringify(activeContext)
+    : '{}';
+  return `${userId || 'anonymous'}::${sessionId || 'anonymous'}::${normalizedQuery}::${normalizedContext}`;
+}
 
 // Separate concurrency and circuit-breaker for background (text) vs live-critical calls.
 const geminiConcurrency = new Set();
@@ -335,6 +346,14 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   const sessionId = options.sessionId || requestingUserId || 'anonymous';
   const activeContext = options.activeContext || {};
   const lifecycleTrigger = options.lifecycleTrigger || 'LIVE_SESSION_START';
+  console.info('[KIARA_LIVE_TOKEN_PREP]', JSON.stringify({
+    userId: requestingUserId || null,
+    sessionId,
+    lifecycleTrigger,
+    hasUserQuery: Boolean(userQuery),
+    userQueryLength: userQuery.length,
+    startedAt: new Date().toISOString(),
+  }));
   if (!hasGeminiServerAccess()) {
     throw new Error('Gemini API key unavailable');
   }
@@ -364,34 +383,85 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   let contextMemoryRevision = 0;
   const memoryGateOpen = Boolean(requestingUserId && sessionId && isMemoryEligible(requestingUserId, sessionId));
 
-  if (requestingUserId && systemPromptBuilder && memoryGateOpen) {
+  if (requestingUserId) {
     try {
-      const built = await Promise.race([
-        systemPromptBuilder.buildSystemPrompt(requestingUserId, {
-          tokenBudget: 1800,
-          trigger: 'session_start',
-          lifecycleTrigger,
-          userQuery,
-          sessionId,
-          activeContext,
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('systemPromptBuilder timeout')), PROMPT_BUILDER_TIMEOUT_MS)),
-      ]);
-      if (built && built.systemPrompt) {
-        dynamicSystemInstruction = `${GEMINI_LIVE_SYSTEM_INSTRUCTION}\n\n${built.systemPrompt}`;
-        promptBuilderApplied = true;
-        memoryRevision = Number(built.memoryRevision) || 0;
-        contextMemoryRevision = Number(built.contextMemoryRevision) || memoryRevision;
-
-        console.info('[KIARA_SESSION_CONTEXT]', JSON.stringify({
+      const User = require('../../models/User');
+      const user = await User.findById(requestingUserId).select('firstName lastName displayName fullName');
+      const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() || user?.fullName || user?.displayName || '';
+      if (fullName) {
+        dynamicSystemInstruction = buildGeminiLiveSystemInstruction(fullName);
+        console.info('[KIARA_IDENTITY_ATTACH]', JSON.stringify({
           userId: requestingUserId,
           sessionId,
-          lifecycleTrigger,
-          promptBuilderApplied: true,
-          userFullNamePresent: Boolean(built.userFullNamePresent),
-          userFullNameLength: built.userFullName ? String(built.userFullName).length : 0,
+          attachedFullName: fullName,
           systemInstructionLength: dynamicSystemInstruction.length,
+          lifecycleTrigger,
         }));
+      } else {
+        console.info('[KIARA_IDENTITY_ATTACH]', JSON.stringify({
+          userId: requestingUserId,
+          sessionId,
+          attachedFullName: null,
+          reason: 'no_full_name_available',
+          lifecycleTrigger,
+        }));
+      }
+    } catch (error) {
+      console.warn('[KIARA_IDENTITY_ATTACH]', JSON.stringify({
+        userId: requestingUserId,
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+        reason: 'identity_lookup_failed',
+        lifecycleTrigger,
+      }));
+    }
+  }
+
+  if (requestingUserId && systemPromptBuilder && memoryGateOpen) {
+    try {
+      const cacheKey = createPromptCacheKey(requestingUserId, sessionId, userQuery, activeContext);
+      const cachedPrompt = systemPromptCache.get(cacheKey);
+      const now = Date.now();
+      if (cachedPrompt && now - cachedPrompt.timestamp <= SYSTEM_PROMPT_CACHE_TTL_MS) {
+        dynamicSystemInstruction = cachedPrompt.systemInstruction;
+        promptBuilderApplied = true;
+        memoryRevision = Number(cachedPrompt.memoryRevision) || 0;
+        contextMemoryRevision = Number(cachedPrompt.contextMemoryRevision) || memoryRevision;
+      } else {
+        const built = await Promise.race([
+          systemPromptBuilder.buildSystemPrompt(requestingUserId, {
+            tokenBudget: 1800,
+            trigger: 'session_start',
+            lifecycleTrigger,
+            userQuery,
+            sessionId,
+            activeContext,
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('systemPromptBuilder timeout')), PROMPT_BUILDER_TIMEOUT_MS)),
+        ]);
+        if (built && built.systemPrompt) {
+          dynamicSystemInstruction = `${GEMINI_LIVE_SYSTEM_INSTRUCTION}\n\n${built.systemPrompt}`;
+          promptBuilderApplied = true;
+          memoryRevision = Number(built.memoryRevision) || 0;
+          contextMemoryRevision = Number(built.contextMemoryRevision) || memoryRevision;
+          systemPromptCache.set(cacheKey, {
+            systemInstruction: dynamicSystemInstruction,
+            memoryRevision,
+            contextMemoryRevision,
+            timestamp: now,
+          });
+
+          console.info('[KIARA_SESSION_CONTEXT]', JSON.stringify({
+            userId: requestingUserId,
+            sessionId,
+            lifecycleTrigger,
+            promptBuilderApplied: true,
+            userFullNamePresent: Boolean(built.userFullNamePresent),
+            userFullNameLength: built.userFullName ? String(built.userFullName).length : 0,
+            systemInstructionLength: dynamicSystemInstruction.length,
+            cacheHit: false,
+          }));
+        }
       }
     } catch {
     }

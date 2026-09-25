@@ -8,6 +8,23 @@ exports.REALTIME_REPLY_MAX_CHARS = 220;
 exports.GEMINI_TEXT_MODEL = 'gemini-2.5-flash';
 exports.GEMINI_LIVE_MODEL = 'gemini-3.1-flash-live-preview';
 exports.GEMINI_LIVE_VOICE = 'Leda';
+function normalizeUserFullName(userName) {
+  if (typeof userName !== 'string') return '';
+  const trimmed = userName.trim();
+  return trimmed || '';
+}
+
+exports.buildGeminiLiveSystemInstruction = function buildGeminiLiveSystemInstruction(userName = '') {
+  const normalizedName = normalizeUserFullName(userName);
+  const baseInstruction = exports.GEMINI_LIVE_SYSTEM_INSTRUCTION || '';
+
+  if (!normalizedName) {
+    return baseInstruction;
+  }
+
+  return `${baseInstruction}\n\n====================================\nAUTHENTICATED USER IDENTITY\n====================================\n\nThe currently authenticated user full name is: "${normalizedName}".\nUse this identity naturally and sparingly when relevant.\nDo not force the name into every message.\nDo not invent, guess, or fabricate another name.\nIf the user is not directly relevant to the current interaction, keep the name out of the response entirely.\n`;
+};
+
 exports.GEMINI_LIVE_SYSTEM_INSTRUCTION = `
 You are Kiara.
 

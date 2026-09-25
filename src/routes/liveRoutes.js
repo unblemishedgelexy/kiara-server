@@ -32,6 +32,12 @@ router.post('/health/check', async (_req, res) => {
 });
 
 router.post('/token', authMiddleware.optional, async (req, res) => {
+  const requestStartedAt = performance.now ? performance.now() : Date.now();
+  const traceId = req.headers['x-kiara-trace-id'] || req.headers['X-Kiara-Trace-Id'] || `live-token-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  if (process.env.NODE_ENV === 'development' || process.env.KIARA_LATENCY_DEBUG === 'true') {
+    console.info('[KIARA_LATENCY_BACKEND]', JSON.stringify({ traceId, route: '/api/live/token', stage: 'request_received', ms: Math.round(requestStartedAt) }));
+  }
+
   if (!env.geminiApiKey) {
     res.status(200).json({
       offlineMode: true,
@@ -50,8 +56,23 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
   const userQuery = typeof requestBody.userQuery === 'string' ? requestBody.userQuery : '';
   const sessionId = typeof requestBody.sessionId === 'string' ? requestBody.sessionId : userId || 'anonymous';
   const activeContext = requestBody.activeContext && typeof requestBody.activeContext === 'object' ? requestBody.activeContext : {};
+  console.info('[KIARA_LIVE_SESSION_START]', JSON.stringify({
+    traceId,
+    userId,
+    sessionId,
+    lifecycleTrigger: req.lifecycleTrigger || 'LIVE_SESSION_START',
+    authHeaderPresent: Boolean(req.headers.authorization || req.headers['x-access-token']),
+    hasUserQuery: Boolean(userQuery),
+    userQueryLength: userQuery.length,
+    at: new Date().toISOString(),
+  }));
   try {
-    const token = await createLiveEphemeralToken(userId, { userQuery, sessionId, activeContext, lifecycleTrigger: req.lifecycleTrigger || 'LIVE_SESSION_START' });
+    const authCompletedAt = performance.now ? performance.now() : Date.now();
+    if (process.env.NODE_ENV === 'development' || process.env.KIARA_LATENCY_DEBUG === 'true') {
+      console.info('[KIARA_LATENCY_BACKEND]', JSON.stringify({ traceId, route: '/api/live/token', stage: 'auth_complete', ms: Math.round(authCompletedAt - requestStartedAt) }));
+    }
+
+    const token = await createLiveEphemeralToken(userId, { userQuery, sessionId, activeContext, lifecycleTrigger: req.lifecycleTrigger || 'LIVE_SESSION_START', traceId });
 
     if (!token || typeof token.token !== 'string' || !token.token.trim()) {
       console.error('[ERROR]', 'Live token generation returned invalid token data.');
@@ -65,6 +86,10 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
       newSessionExpireTime: token.newSessionExpireTime,
       sessionConfig: token.sessionConfig,
     };
+
+    if (process.env.NODE_ENV === 'development' || process.env.KIARA_LATENCY_DEBUG === 'true') {
+      console.info('[KIARA_LATENCY_BACKEND]', JSON.stringify({ traceId, route: '/api/live/token', stage: 'response_sent', ms: Math.round((performance.now ? performance.now() : Date.now()) - requestStartedAt) }));
+    }
 
     res.status(200).json(payload);
   } catch (error) {

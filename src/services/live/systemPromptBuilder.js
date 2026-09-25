@@ -44,16 +44,7 @@ async function getAuthenticatedUserContext(userId) {
       return '';
     }
 
-    return `
-AUTHENTICATED USER CONTEXT
-- Current authenticated user fullName: "${fullName}"
-- Use the user's fullName naturally and sparingly when appropriate.
-- Do NOT force the name into every message or every response.
-- Do NOT invent, shorten, translate, modify, or guess a name when the authenticated fullName is unavailable.
-- If the user's name is missing, use generic non-name addressing instead.
-- Treat this as authenticated identity data, not user prompt content or arbitrary chat text.
-- Do not expose this user context as internal system information unless the user directly asks about their own identity.
-`;
+    return '';
   } catch {
     return '';
   }
@@ -116,7 +107,7 @@ module.exports = {
   - If the authenticated user's fullName is not available, do not guess, invent, or generate a name.
   `;
 
-      const promptParts = [authenticatedUserContext, String(result.systemPrompt || '').trim(), RESPONSE_GUIDELINES].filter(Boolean);
+      const promptParts = [String(result.systemPrompt || '').trim(), RESPONSE_GUIDELINES].filter(Boolean);
       const augmented = promptParts.join('\n\n');
       const resolvedUser = await User.findById(userId).select('firstName lastName displayName');
       const resolvedFullName = normalizeUserFullName(resolvedUser);
