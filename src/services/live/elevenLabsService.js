@@ -7,11 +7,19 @@ const {
 } = require('../../config/constants');
 
 async function streamElevenLabsSpeech(text) {
+  console.log('[KIARA_TTS] ElevenLabs config:', {
+    apiKeyConfigured: Boolean(env.elevenLabsApiKey),
+    voiceIdConfigured: Boolean(env.elevenLabsVoiceId),
+    voiceId: env.elevenLabsVoiceId || null,
+  });
+
   if (!env.elevenLabsApiKey || !env.elevenLabsVoiceId) {
+    console.log('[KIARA_TTS] ElevenLabs API key or voice ID is not set.');
     return null;
   }
 
   const voiceId = encodeURIComponent(env.elevenLabsVoiceId);
+
   const query = new URLSearchParams({
     output_format: ELEVENLABS_OUTPUT_FORMAT,
     optimize_streaming_latency: String(ELEVENLABS_STREAM_LATENCY),
