@@ -79,7 +79,6 @@ function createLiveSessionConfig(options = {}) {
   const requestedVoice = options.voiceName || GEMINI_LIVE_VOICE;
   const model = normalizeLiveModel(requestedModel);
   const voiceName = normalizeLiveVoice(requestedVoice);
-
   return {
     model,
     responseModalities: ['AUDIO'],
@@ -159,7 +158,7 @@ function createLiveConnectConfig(sessionConfig) {
         disabled: false,
         endOfSpeechSensitivity: 'END_SENSITIVITY_HIGH',
         prefixPaddingMs: 120,
-        silenceDurationMs: 420,
+        silenceDurationMs: 280,
         startOfSpeechSensitivity: 'START_SENSITIVITY_HIGH',
       },
       activityHandling: 'START_OF_ACTIVITY_INTERRUPTS',
@@ -176,7 +175,7 @@ function createLiveConnectConfig(sessionConfig) {
     },
     systemInstruction: sessionConfig.systemInstruction,
     temperature: 0.7,
-    tools,
+    ...(tools.length ? { tools } : {}),
   };
 }
 
