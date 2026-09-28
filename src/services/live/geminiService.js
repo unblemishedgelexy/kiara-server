@@ -341,19 +341,10 @@ async function summarizeConversation(input) {
 const LIVE_TOKEN_CREATION_TIMEOUT_MS = 12000;
 
 async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
-  const requestStartedAt = Date.now();
   const userQuery = options.userQuery || '';
   const sessionId = options.sessionId || requestingUserId || 'anonymous';
   const activeContext = options.activeContext || {};
   const lifecycleTrigger = options.lifecycleTrigger || 'LIVE_SESSION_START';
-  console.info('[KIARA_LIVE_TOKEN_PREP]', JSON.stringify({
-    userId: requestingUserId || null,
-    sessionId,
-    lifecycleTrigger,
-    hasUserQuery: Boolean(userQuery),
-    userQueryLength: userQuery.length,
-    startedAt: new Date().toISOString(),
-  }));
   if (!hasGeminiServerAccess()) {
     throw new Error('Gemini API key unavailable');
   }
@@ -390,30 +381,9 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
       const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() || user?.fullName || user?.displayName || '';
       if (fullName) {
         dynamicSystemInstruction = buildGeminiLiveSystemInstruction(fullName);
-        console.info('[KIARA_IDENTITY_ATTACH]', JSON.stringify({
-          userId: requestingUserId,
-          sessionId,
-          attachedFullName: fullName,
-          systemInstructionLength: dynamicSystemInstruction.length,
-          lifecycleTrigger,
-        }));
-      } else {
-        console.info('[KIARA_IDENTITY_ATTACH]', JSON.stringify({
-          userId: requestingUserId,
-          sessionId,
-          attachedFullName: null,
-          reason: 'no_full_name_available',
-          lifecycleTrigger,
-        }));
       }
     } catch (error) {
-      console.warn('[KIARA_IDENTITY_ATTACH]', JSON.stringify({
-        userId: requestingUserId,
-        sessionId,
-        error: error instanceof Error ? error.message : String(error),
-        reason: 'identity_lookup_failed',
-        lifecycleTrigger,
-      }));
+      void error;
     }
   }
 
@@ -451,29 +421,10 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
             timestamp: now,
           });
 
-          console.info('[KIARA_SESSION_CONTEXT]', JSON.stringify({
-            userId: requestingUserId,
-            sessionId,
-            lifecycleTrigger,
-            promptBuilderApplied: true,
-            userFullNamePresent: Boolean(built.userFullNamePresent),
-            userFullNameLength: built.userFullName ? String(built.userFullName).length : 0,
-            systemInstructionLength: dynamicSystemInstruction.length,
-            cacheHit: false,
-          }));
         }
       }
     } catch {
     }
-  } else if (requestingUserId) {
-    console.info('[KIARA_SESSION_CONTEXT]', JSON.stringify({
-      userId: requestingUserId,
-      sessionId,
-      lifecycleTrigger,
-      promptBuilderApplied: false,
-      reason: 'memory_gate_closed',
-      systemInstructionLength: dynamicSystemInstruction.length,
-    }));
   }
 
   const sessionConfig = createLiveSessionConfig({
@@ -518,8 +469,6 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
 
   try {
     const dur = now() - start;
-    console.info('[PIPELINE_STAGE]', `name=gemini_ephemeral_token_generation durationMs=${dur}`);
-    console.info('[GEMINI_REQUEST_FINISHED]', JSON.stringify({ operation: 'createLiveEphemeralToken', userId: requestingUserId || 'anonymous', durationMs: Date.now() - requestStartedAt, timestamp: new Date().toISOString() }));
     try { recordGeminiMetric('gemini_ephemeral_token_generation', dur, { userId: requestingUserId }); } catch {}
   } catch {}
 

@@ -11,7 +11,16 @@ const limiter = rateLimit({
 });
 
 module.exports = function (app) {
-  app.use(helmet());
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+        'script-src': ["'self'", 'https://checkout.razorpay.com'],
+        'frame-src': ["'self'", 'https://api.razorpay.com', 'https://checkout.razorpay.com'],
+        'connect-src': ["'self'", 'https://api.razorpay.com', 'https://checkout.razorpay.com'],
+      },
+    },
+  }));
 
   if (env.nodeEnv === 'production') {
     app.set('trust proxy', 1);

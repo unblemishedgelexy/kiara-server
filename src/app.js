@@ -4,6 +4,7 @@ const { randomUUID } = require('crypto');
 const cors = require('cors');
 const authRoutes = require('./routes/authRoutes');
 const profileRoutes = require('./routes/profileRoutes');
+const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const passwordRoutes = require('./routes/passwordRoutes');
 const aiRoutes = require('./routes/aiRoutes');
 const liveRoutes = require('./routes/liveRoutes');
@@ -69,11 +70,6 @@ const createApp = () => {
     req.lifecycleTrigger = typeof req.headers['x-kiara-trigger'] === 'string' && req.headers['x-kiara-trigger'].trim()
       ? req.headers['x-kiara-trigger'].trim()
       : 'USER_ACTION';
-    const requestStartedAt = Date.now();
-    console.info('[REQUEST_START]', JSON.stringify({ requestId: req.requestId, trigger: req.lifecycleTrigger, endpoint: req.originalUrl, method: req.method, start: new Date().toISOString() }));
-    res.once('finish', () => {
-      console.info('[REQUEST_END]', JSON.stringify({ requestId: req.requestId, trigger: req.lifecycleTrigger, route: req.originalUrl, status: res.statusCode, durationMs: Date.now() - requestStartedAt, end: new Date().toISOString(), userId: req.userId || null }));
-    });
     next();
   });
 
@@ -98,6 +94,7 @@ const createApp = () => {
   app.use('/api/auth', authRoutes);
   app.use('/auth', authRoutes);
   app.use('/api/profile', profileRoutes); 
+  app.use('/api/subscriptions', subscriptionRoutes);
   app.use('/api/password', passwordRoutes);
   app.use('/api/ai', aiRoutes);
   app.use('/api/live', liveRoutes);

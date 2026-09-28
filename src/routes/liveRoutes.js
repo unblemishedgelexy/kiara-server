@@ -10,6 +10,7 @@ const {
 
 const { env } = require('../config/env');
 const authMiddleware = require('../middleware/authMiddleware');
+const subscriptionUsageService = require('../services/subscriptions/usageService');
 
 const router = express.Router();
 
@@ -97,10 +98,6 @@ router.post('/health/check', async (_req, res) => {
  * Gemini Live token route remains completely separate.
  */
 router.post('/tts', authMiddleware.optional, async (req, res) => {
-  const requestStartedAt = performance.now
-    ? performance.now()
-    : Date.now();
-
   const traceId =
     req.headers['x-kiara-trace-id'] ||
     req.headers['X-Kiara-Trace-Id'] ||
@@ -177,22 +174,6 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
     }
 
     const userId = req.userId || null;
-
-    if (
-      process.env.NODE_ENV === 'development' ||
-      process.env.KIARA_LATENCY_DEBUG === 'true'
-    ) {
-      console.info(
-        '[KIARA_LATENCY_BACKEND]',
-        JSON.stringify({
-          traceId,
-          route: '/api/live/tts',
-          stage: 'request_received',
-          textLength: text.length,
-          userId,
-        })
-      );
-    }
 
     /**
      * ----------------------------------------------------------
@@ -333,25 +314,6 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
      * Latency logging
      * ----------------------------------------------------------
      */
-    if (
-      process.env.NODE_ENV === 'development' ||
-      process.env.KIARA_LATENCY_DEBUG === 'true'
-    ) {
-      const completedAt = performance.now
-        ? performance.now()
-        : Date.now();
-
-      console.info(
-        '[KIARA_LATENCY_BACKEND]',
-        JSON.stringify({
-          traceId,
-          route: '/api/live/tts',
-          stage: 'response_stream_completed',
-          ms: Math.round(completedAt - requestStartedAt),
-          textLength: text.length,
-        })
-      );
-    }
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
@@ -391,32 +353,13 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
  * IMPORTANT:
  * ElevenLabs TTS is intentionally NOT mixed into this route.
  */
-router.post('/token', authMiddleware.optional, async (req, res) => {
-  const requestStartedAt = performance.now
-    ? performance.now()
-    : Date.now();
-
+router.post('/token', authMiddleware, async (req, res) => {
   const traceId =
     req.headers['x-kiara-trace-id'] ||
     req.headers['X-Kiara-Trace-Id'] ||
     `live-token-${Date.now().toString(36)}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
-
-  if (
-    process.env.NODE_ENV === 'development' ||
-    process.env.KIARA_LATENCY_DEBUG === 'true'
-  ) {
-    console.info(
-      '[KIARA_LATENCY_BACKEND]',
-      JSON.stringify({
-        traceId,
-        route: '/api/live/token',
-        stage: 'request_received',
-        ms: Math.round(requestStartedAt),
-      })
-    );
-  }
 
   if (!env.geminiApiKey) {
     res.status(200).json({
@@ -452,46 +395,28 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
       ? requestBody.activeContext
       : {};
 
-  console.info(
-    '[KIARA_LIVE_SESSION_START]',
-    JSON.stringify({
-      traceId,
-      userId,
-      sessionId,
-      lifecycleTrigger:
+  let meteringSessionId = null;
+  let createdMeteringSession = false;
+  if (userId) {
+    try {
+      const meter = await subscriptionUsageService.startLiveSession(
+        userId,
         req.lifecycleTrigger || 'LIVE_SESSION_START',
-      authHeaderPresent: Boolean(
-        req.headers.authorization ||
-          req.headers['x-access-token']
-      ),
-      hasUserQuery: Boolean(userQuery),
-      userQueryLength: userQuery.length,
-      at: new Date().toISOString(),
-    })
-  );
+      );
+      meteringSessionId = meter.sessionId;
+      createdMeteringSession = meter.created;
+    } catch (error) {
+      const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 503;
+      return res.status(statusCode).json({
+        success: false,
+        code: error?.code || 'LIVE_USAGE_UNAVAILABLE',
+        error: error instanceof Error ? error.message : 'Unable to start the live session.',
+        ...(error?.details ? { details: error.details } : {}),
+      });
+    }
+  }
 
   try {
-    const authCompletedAt = performance.now
-      ? performance.now()
-      : Date.now();
-
-    if (
-      process.env.NODE_ENV === 'development' ||
-      process.env.KIARA_LATENCY_DEBUG === 'true'
-    ) {
-      console.info(
-        '[KIARA_LATENCY_BACKEND]',
-        JSON.stringify({
-          traceId,
-          route: '/api/live/token',
-          stage: 'auth_complete',
-          ms: Math.round(
-            authCompletedAt - requestStartedAt
-          ),
-        })
-      );
-    }
-
     const token = await createLiveEphemeralToken(userId, {
       userQuery,
       sessionId,
@@ -511,6 +436,10 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
         'Live token generation returned invalid token data.'
       );
 
+      if (userId && createdMeteringSession && meteringSessionId) {
+        await subscriptionUsageService.abortLiveSession(userId, meteringSessionId).catch(() => undefined);
+      }
+
       res.status(502).json({
         error:
           'Live token generation returned invalid token data.',
@@ -525,29 +454,15 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
       newSessionExpireTime:
         token.newSessionExpireTime,
       sessionConfig: token.sessionConfig,
+      ...(meteringSessionId ? { meteringSessionId } : {}),
     };
 
-    if (
-      process.env.NODE_ENV === 'development' ||
-      process.env.KIARA_LATENCY_DEBUG === 'true'
-    ) {
-      console.info(
-        '[KIARA_LATENCY_BACKEND]',
-        JSON.stringify({
-          traceId,
-          route: '/api/live/token',
-          stage: 'response_sent',
-          ms: Math.round(
-            (performance.now
-              ? performance.now()
-              : Date.now()) - requestStartedAt
-          ),
-        })
-      );
-    }
 
     res.status(200).json(payload);
   } catch (error) {
+    if (userId && createdMeteringSession && meteringSessionId) {
+      await subscriptionUsageService.abortLiveSession(userId, meteringSessionId).catch(() => undefined);
+    }
     const errorMessage =
       error instanceof Error
         ? error.message
@@ -557,10 +472,13 @@ router.post('/token', authMiddleware.optional, async (req, res) => {
       errorMessage.toLowerCase();
 
     const responseBody = {
+      success: false,
+      code: error?.code || 'LIVE_TOKEN_FAILED',
       error: errorMessage,
+      ...(error?.details ? { details: error.details } : {}),
     };
 
-    let statusCode = 500;
+    let statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
 
     if (
       normalizedMessage.includes('gemini api key')

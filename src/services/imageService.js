@@ -22,7 +22,7 @@ async function uploadFileToImageKit(filePath, fileName) {
     isBase64: true,
   };
 
-  const res = await imagekit.upload(uploadOptions);
+  const res = await imagekit.files.upload(uploadOptions);
   // res.url contains the full URL
   return res;
 }

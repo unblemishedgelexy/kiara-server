@@ -3,12 +3,15 @@ const connectDB = require('./db/connect');
 const { env } = require('./config/env');
 const promotionWorker = require('./services/memory/promotion/promotionWorker');
 const WorkingMemoryRedis = require('./services/workingMemory/redisOperations');
+const { ensureSubscriptionIndexes } = require('./services/subscriptions/subscriptionIndexes');
 
 async function startServer() {
   const dbConnected = await connectDB();
 
   if (!dbConnected) {
     console.error('[ERROR]', 'Proceeding without MongoDB. Profile and auth routes may be unavailable.');
+  } else {
+    await ensureSubscriptionIndexes();
   }
 
   const memoryEnabled = Boolean(env.liveMemoryEnabled);
