@@ -1,4 +1,5 @@
 const { randomUUID } = require('crypto');
+const { env } = require('../../config/env');
 const Subscription = require('../../models/Subscription');
 const SubscriptionUsage = require('../../models/SubscriptionUsage');
 const { findPaidPlan, freePlan, getPublicPlans, toEntitlementPlan } = require('../../config/subscriptionPlans');
@@ -189,17 +190,19 @@ async function releaseChatReservation(userId, reservationId) {
 async function startLiveSession(userId, lifecycleTrigger = 'LIVE_SESSION_START', now = new Date()) {
   const period = getUtcBillingPeriod(now);
   const currentPlan = await getCurrentSubscription(userId, now);
-  const plan = currentPlan ? toEntitlementPlan(currentPlan.planId) : freePlan;
-  const liveLimitSeconds = plan.liveMinutes === null ? null : plan.liveMinutes * 60;
+  const localDevSubscriptionBypass = env.nodeEnv === 'development' && env.localDevSubscriptionBypass === true;
+  const plan = localDevSubscriptionBypass ? freePlan : (currentPlan ? toEntitlementPlan(currentPlan.planId) : freePlan);
+  const liveLimitSeconds = localDevSubscriptionBypass ? null : (plan.liveMinutes === null ? null : plan.liveMinutes * 60);
   let usage = await ensureUsageRow(userId, period);
   const isResume = lifecycleTrigger === 'LIVE_TOKEN_REFRESH' || lifecycleTrigger === 'LIVE_SESSION_RECONNECT';
 
   if (usage.activeLiveSessionId) {
     const activeId = usage.activeLiveSessionId;
     const lastHeartbeat = usage.lastLiveHeartbeatAt || usage.updatedAt || usage.createdAt;
-    const ageMs = now.getTime() - new Date(lastHeartbeat).getTime();
+    const heartbeatAgeMs = lastHeartbeat ? now.getTime() - new Date(lastHeartbeat).getTime() : Infinity;
+    const staleOrBroken = !usage.lastLiveHeartbeatAt || heartbeatAgeMs >= LIVE_SESSION_STALE_MS;
 
-    if (isResume && ageMs < LIVE_SESSION_STALE_MS) {
+    if (isResume && !staleOrBroken) {
       const heartbeat = await heartbeatLiveSession(userId, activeId, now);
       if (!heartbeat.allowed) {
         throw createUsageError('Your monthly AI voice usage is complete.', 'USAGE_LIMIT_REACHED', 402, {
@@ -212,28 +215,30 @@ async function startLiveSession(userId, lifecycleTrigger = 'LIVE_SESSION_START',
       return { sessionId: activeId, created: false };
     }
 
-    if (!isResume && ageMs < LIVE_SESSION_STALE_MS) {
+    if (!isResume && !staleOrBroken) {
       throw createUsageError('A Kiara Live session is already active for this account.', 'LIVE_SESSION_ALREADY_ACTIVE', 409);
     }
 
-    const finalHeartbeat = await heartbeatLiveSession(userId, activeId, now).catch((error) => {
-      if (error.code === 'LIVE_SESSION_NOT_ACTIVE') return null;
-      throw error;
-    });
-    if (finalHeartbeat && !finalHeartbeat.allowed) {
-      throw createUsageError('Your monthly AI voice usage is complete.', 'USAGE_LIMIT_REACHED', 402, {
-        plan: plan.id,
-        usage: Math.ceil(finalHeartbeat.liveSeconds / 60),
-        limit: plan.liveMinutes,
-        upgradeAvailable: true,
+    if (staleOrBroken) {
+      const finalHeartbeat = await heartbeatLiveSession(userId, activeId, now).catch((error) => {
+        if (error.code === 'LIVE_SESSION_NOT_ACTIVE') return null;
+        throw error;
       });
-    }
+      if (finalHeartbeat && !finalHeartbeat.allowed) {
+        throw createUsageError('Your monthly AI voice usage is complete.', 'USAGE_LIMIT_REACHED', 402, {
+          plan: plan.id,
+          usage: Math.ceil(finalHeartbeat.liveSeconds / 60),
+          limit: plan.liveMinutes,
+          upgradeAvailable: true,
+        });
+      }
 
-    await SubscriptionUsage.updateOne(
-      { _id: usage._id, activeLiveSessionId: activeId },
-      { $set: { activeLiveSessionId: null, lastLiveHeartbeatAt: null } },
-    );
-    usage = await ensureUsageRow(userId, period);
+      await SubscriptionUsage.updateOne(
+        { _id: usage._id, activeLiveSessionId: activeId },
+        { $set: { activeLiveSessionId: null, lastLiveHeartbeatAt: null } },
+      );
+      usage = await ensureUsageRow(userId, period);
+    }
   }
 
   const sessionId = randomUUID();
@@ -300,8 +305,9 @@ async function heartbeatLiveSession(userId, sessionId, now = new Date()) {
   }
 
   const activePlan = await getCurrentSubscription(userId, now);
-  const entitlement = activePlan ? toEntitlementPlan(activePlan.planId) : freePlan;
-  const maxSeconds = entitlement.liveMinutes === null ? null : entitlement.liveMinutes * 60;
+  const localDevSubscriptionBypass = env.nodeEnv === 'development' && env.localDevSubscriptionBypass === true;
+  const entitlement = localDevSubscriptionBypass ? freePlan : (activePlan ? toEntitlementPlan(activePlan.planId) : freePlan);
+  const maxSeconds = localDevSubscriptionBypass ? null : (entitlement.liveMinutes === null ? null : entitlement.liveMinutes * 60);
   const { billedSeconds, limitReached: reachedLimit } = calculateLiveCharge(
     elapsedSeconds,
     usage.liveSeconds,

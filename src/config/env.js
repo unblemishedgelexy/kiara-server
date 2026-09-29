@@ -84,6 +84,7 @@ const env = {
   mongoUri: readEnv('MONGODB_URI', 'mongodb://127.0.0.1:27017/kiara_ai'),
   nodeEnv,
   localDevAuthEnabled: nodeEnv === 'development' && readEnv('LOCAL_DEV_AUTH_ENABLED', 'false').toLowerCase() === 'true',
+  localDevSubscriptionBypass: nodeEnv === 'development' && readEnv('LOCAL_DEV_SUBSCRIPTION_BYPASS', 'false').toLowerCase() === 'true',
   port: readNumber('PORT', 4000),
   // Redis Configuration for Short-term Memory
   redisHost: readEnv('REDIS_HOST', 'localhost'),

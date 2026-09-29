@@ -14,15 +14,8 @@ function normalizeUserFullName(userName) {
   return trimmed || '';
 }
 
-exports.buildGeminiLiveSystemInstruction = function buildGeminiLiveSystemInstruction(userName = '') {
-  const normalizedName = normalizeUserFullName(userName);
-  const baseInstruction = exports.GEMINI_LIVE_SYSTEM_INSTRUCTION || '';
-
-  if (!normalizedName) {
-    return baseInstruction;
-  }
-
-  return `${baseInstruction}\n\n====================================\nAUTHENTICATED USER IDENTITY\n====================================\n\nThe currently authenticated user full name is: "${normalizedName}".\nUse this identity naturally and sparingly when relevant.\nDo not force the name into every message.\nDo not invent, guess, or fabricate another name.\nIf the user is not directly relevant to the current interaction, keep the name out of the response entirely.\n`;
+exports.buildGeminiLiveSystemInstruction = function buildGeminiLiveSystemInstruction(_userName = '') {
+  return exports.GEMINI_LIVE_SYSTEM_INSTRUCTION || '';
 };
 
 exports.GEMINI_LIVE_SYSTEM_INSTRUCTION = `
@@ -186,28 +179,6 @@ If the user says something she disagrees with:
 If the user makes a good point:
 
 "okay, fair. Isme tum sahi ho."
-
-====================================
-AUTHENTICATED USER CONTEXT
-====================================
-
-The currently authenticated user may be available in the backend session context.
-
-If the authenticated user has a valid fullName available, use it naturally in conversation when it feels appropriate.
-
-Rules:
-- Use the authenticated user's actual fullName only if it exists and is trusted.
-- Do NOT guess, invent, generate, or fabricate a name.
-- Do NOT force the user's name into every message.
-- Do NOT repeat the user's name artificially in every reply.
-- Use the name naturally, sparingly, and contextually when it feels personal or emotionally relevant.
-- If the user's fullName is missing, blank, or unavailable, use generic neutral wording instead.
-- Treat this as authenticated identity data, not as arbitrary prompt content or user-supplied text.
-
-Example:
-- User asks something casual while the authenticated user is known.
-- Good: "Bas tumse baat kar rahi hoon, <actual authenticated fullName>."
-- Bad: "<actual authenticated fullName>, tumse baat kar rahi hoon, <actual authenticated fullName>, <actual authenticated fullName>..."
 
 ====================================
 KIARA PRODUCT / CREATOR CONTEXT

@@ -374,19 +374,6 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   let contextMemoryRevision = 0;
   const memoryGateOpen = Boolean(requestingUserId && sessionId && isMemoryEligible(requestingUserId, sessionId));
 
-  if (requestingUserId) {
-    try {
-      const User = require('../../models/User');
-      const user = await User.findById(requestingUserId).select('firstName lastName displayName fullName');
-      const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() || user?.fullName || user?.displayName || '';
-      if (fullName) {
-        dynamicSystemInstruction = buildGeminiLiveSystemInstruction(fullName);
-      }
-    } catch (error) {
-      void error;
-    }
-  }
-
   if (requestingUserId && systemPromptBuilder && memoryGateOpen) {
     try {
       const cacheKey = createPromptCacheKey(requestingUserId, sessionId, userQuery, activeContext);

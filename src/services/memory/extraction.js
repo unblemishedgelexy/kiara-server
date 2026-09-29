@@ -40,8 +40,8 @@ function isLikelyFragment(text) {
 
 function computeEvidence(text) {
   const normalized = normalizeText(text);
-  const explicit = /\b(?:main|mujhe|mera|meri|hum|ham|aap|ap|naam|name|bhai|behen|friend|project|work|build|develop|pasand|pata|jaanta|skill|goal|aim|improve|learn|sikha|seekhna)\b/.test(normalized);
-  const userAsserted = /\b(?:main|mujhe|mera|meri|hum|ham|aap|ap)\b/.test(normalized) || /\b(?:hai|hoon|hoga|kar raha|kar rahi|pasand|chahiye|chahata|sikha|seekhna)\b/.test(normalized);
+  const explicit = /\b(?:main|mujhe|mera|meri|hum|ham|aap|ap|my|naam|name|bhai|behen|friend|project|work|build|develop|pasand|favorite|favourite|preferred|pata|jaanta|skill|goal|aim|improve|learn|sikha|seekhna)\b/.test(normalized);
+  const userAsserted = /\b(?:main|mujhe|mera|meri|hum|ham|aap|ap|my|i\s+am|i'm)\b/.test(normalized) || /\b(?:hai|hoon|hoga|kar raha|kar rahi|pasand|chahiye|chahata|sikha|seekhna)\b/.test(normalized);
   const repeated = /\b(?:repeated|again|har baar|bar bar)\b/.test(normalized);
   const contextual = /(\b(?:bhai|behen|friend|mother|father|sister|brother|project|company|team|college|school|colleague|teacher|partner|wife|husband|naam|skill|goal|redis|distributed|caching)\b)/.test(normalized);
   return { explicit, userAsserted, repeated, contextual };
@@ -84,7 +84,7 @@ function classifyCandidate(text, contextText) {
   const skillSignals = /(?:skill|sikhn|seekhna|learn|seekh|practise|practice|master|improve|coding|programming)/i;
   
   // Preference patterns (more specific - require actual preference verb forms)
-  const preferenceSignals = /(?:pasand\s+(?:hai|nahi)|pasand|like|love|enjoy)/i;
+  const preferenceSignals = /(?:pasand\s+(?:hai|nahi)|pasand|like|love|enjoy|favorite|favourite|preferred)/i;
 
   if (projectSignals.test(normalized) || projectSignals.test(context)) {
     return 'project';
@@ -271,6 +271,13 @@ function deriveLogicalAttribute(category, rawText) {
 function extractCanonicalValue(rawText, category) {
   const text = normalizeText(rawText || '');
   if (!text) return null;
+
+  if (category === 'preference') {
+    const preferenceValueMatch = text.match(/\b(?:favorite|favourite|preferred)\s+(?:color|colour|food|drink|book|movie|song|music|place|city|language|sport|game|hobby|artist|author|topic)\s+(?:is|are|:|=)\s*(.+)$/i);
+    if (preferenceValueMatch?.[1]) {
+      return preferenceValueMatch[1].replace(/[.!?]+$/, '').trim();
+    }
+  }
 
   if (category === 'fact') {
     const factDelimiterMatch = text.match(/^(?:.*?)(?:\bis\b|\:|=)\s*["']?(.+?)["']?\s*$/i);
