@@ -85,7 +85,10 @@ Only emit a memory for a clear user-originated factual assertion or correction. 
 Utterance: ${String(text).slice(0, 1200)}`;
 
   try {
-    const response = await generateText({ prompt, userId, maxOutputTokens: 700, temperature: 0, candidateCount: 1, maxAttempts: 1 });
+    const response = await Promise.race([
+      generateText({ prompt, userId, maxOutputTokens: 700, temperature: 0, candidateCount: 1, maxAttempts: 1 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('GEMINI_TIMEOUT')), 1500)),
+    ]);
     const parsed = parseJson(response.text);
     const normalized = normalizeResult(parsed, sourceTurnId, 'user');
     return normalized;

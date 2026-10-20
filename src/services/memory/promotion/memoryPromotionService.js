@@ -4,7 +4,7 @@ const { env } = require('../../../config/env');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 const pineconeService = require('../../pineconeService');
 const { analyzeConversation, buildEpisode } = require('./memoryAnalyzer');
-const { computeEmbedding } = require('../../../utils/memory/memoryUtils');
+const { computeEmbedding, getPineconeEmbeddingOptions } = require('../../../utils/memory/memoryUtils');
 const { isWipeInProgress } = require('../deletion/userMemoryWipeService');
 
 const PROMOTION_VERSION = '1';
@@ -134,7 +134,7 @@ async function promoteUserMemory(userId) {
   }
 
   const embeddingStartedAt = Date.now();
-  const embedding = await computeEmbedding(episodeMemory.embeddingText);
+  const embedding = await computeEmbedding(episodeMemory.embeddingText, getPineconeEmbeddingOptions());
   const embeddingDurationMs = Date.now() - embeddingStartedAt;
 
   if (!embedding || !Array.isArray(embedding)) {

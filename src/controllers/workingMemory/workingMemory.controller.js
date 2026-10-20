@@ -4,9 +4,9 @@
  * Working Memory Controller
  *
  * POST /api/working-memory/save  →  MemoryService.saveTurn()
- *   This is the ONLY save path. MemoryService handles both:
- *     1. Redis conversation turn save (synchronous, returned immediately)
- *     2. Background fact extraction + task detection (async, non-blocking)
+ *   This is the live application write boundary. MemoryService always saves
+ *   the conversation turn to STM first, then dispatches the configured legacy
+ *   or canonical durable-memory pipeline in the background.
  *
  * All other endpoints (read, stats, delete, health, debug) now delegate to
  * the central MemoryService so the application has one public entry point.
@@ -18,7 +18,7 @@ const WorkingMemoryController = {
 
   /**
    * POST /api/working-memory/save
-   * Saves complete conversation turn AND triggers background fact extraction.
+   * Saves the STM turn and dispatches the configured background memory write.
    */
   async saveConversationTurn(req, res) {
     try {
@@ -33,7 +33,7 @@ const WorkingMemoryController = {
         });
       }
 
-      const { userId, sessionId, userMessage, aiResponse, ttl, conversationTurnId } = req.body;
+      const { userId, sessionId, userMessage, aiResponse, ttl, conversationTurnId, timestamp, source } = req.body;
 
       const result = await MemoryService.saveTurn({
         userId,
@@ -42,6 +42,8 @@ const WorkingMemoryController = {
         aiResponse,
         ttl,
         conversationTurnId,
+        timestamp,
+        source,
       });
 
       return res.status(200).json(result);
@@ -82,6 +84,7 @@ const WorkingMemoryController = {
         ? await MemoryService.prepareContext(userId, {
           userQuery: String(userQuery),
           sessionId: req.query.sessionId || userId,
+          traceId: String(req.headers['x-kiara-trace-id'] || req.headers['x-request-id'] || 'untraced'),
         })
         : await MemoryService.buildWorkingMemoryContext(userId, '', '', parseInt(limit) || 20);
       return res.status(200).json(result);

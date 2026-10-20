@@ -6,7 +6,7 @@
  * merge with STM, and return ranked memories with confidence and relationship hits.
  */
 
-const { computeEmbedding } = require('../../../utils/memory/memoryUtils');
+const { computeEmbedding, getPineconeEmbeddingOptions } = require('../../../utils/memory/memoryUtils');
 const pineconeService = require('../../pineconeService');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 const { env } = require('../../../config/env');
@@ -77,7 +77,7 @@ async function queryNamespaces({ userId, text, topK = 5 }) {
   const uniqueNs = Array.from(new Set(allowedNamespaces)).filter(Boolean);
 
   // Compute embedding
-  const embedding = await computeEmbedding(text);
+  const embedding = await computeEmbedding(text, getPineconeEmbeddingOptions());
   if (!embedding) return { analysis, results: [] };
 
   // Query each namespace with metadata filter where supported

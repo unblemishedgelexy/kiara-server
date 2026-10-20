@@ -27,9 +27,10 @@ test('billing periods use UTC month boundaries', () => {
   assert.equal(periodEnd.toISOString(), '2026-10-01T00:00:00.000Z');
 });
 
-test('clears a stale live session before creating the next one', async () => {
+test('clears stale live sessions before creating the next one', async () => {
   const now = new Date('2026-09-15T12:00:00.000Z');
   const staleSessionId = 'stale-session';
+  const freshSessionId = 'fresh-session';
   const usageId = new mongoose.Types.ObjectId();
   const previousUsage = {
     _id: usageId,
@@ -38,8 +39,11 @@ test('clears a stale live session before creating the next one', async () => {
     periodEnd: new Date('2026-10-01T00:00:00.000Z'),
     liveSeconds: 120,
     chatMessages: 0,
-    activeLiveSessionId: staleSessionId,
-    lastLiveHeartbeatAt: new Date('2026-09-15T11:20:00.000Z'),
+    activeLiveSessions: [{
+      sessionId: staleSessionId,
+      startedAt: new Date('2026-09-15T11:00:00.000Z'),
+      lastHeartbeatAt: new Date('2026-09-15T11:20:00.000Z'),
+    }],
   };
 
   const originalFindOne = Subscription.findOne;
@@ -71,15 +75,14 @@ test('clears a stale live session before creating the next one', async () => {
         return { ...previousUsage };
       }
 
-      if (filter._id && String(filter._id) === String(usageId) && filter.activeLiveSessionId === staleSessionId) {
-        return { ...previousUsage, activeLiveSessionId: null, lastLiveHeartbeatAt: null };
-      }
-
-      if (filter._id && String(filter._id) === String(usageId) && filter.activeLiveSessionId === null) {
+      if (filter._id && String(filter._id) === String(usageId) && update.$push?.activeLiveSessions) {
         return {
           ...previousUsage,
-          activeLiveSessionId: 'fresh-session',
-          lastLiveHeartbeatAt: now,
+          activeLiveSessions: [{
+            sessionId: freshSessionId,
+            startedAt: now,
+            lastHeartbeatAt: now,
+          }],
         };
       }
 
@@ -87,7 +90,11 @@ test('clears a stale live session before creating the next one', async () => {
     };
 
     SubscriptionUsage.updateOne = async (filter, update) => {
-      if (filter._id && String(filter._id) === String(usageId) && filter.activeLiveSessionId === staleSessionId) {
+      if (
+        filter._id &&
+        String(filter._id) === String(usageId) &&
+        update.$pull?.activeLiveSessions
+      ) {
         return { modifiedCount: 1 };
       }
       return { modifiedCount: 0 };

@@ -18,8 +18,8 @@
  * SAVE PIPELINE
  * ──────────────────────────────────────────────────────────────────
  *  saveTurn()
- *    → WorkingMemoryRedis.saveConversationTurn()    ← returns to caller
- *    → no extraction or long-term-memory side effects
+ *    → WorkingMemoryRedis.saveConversationTurn()    ← synchronous STM write
+ *    → configured legacy/canonical durable-memory work runs in background
  *
  * ──────────────────────────────────────────────────────────────────
  * RETRIEVAL PIPELINE  (called at session start / new prompt)
@@ -31,6 +31,7 @@
  */
 
 const WorkingMemoryRedis = require('../workingMemory/redisOperations');
+const UserModel = require('../../models/User');
 const { InvalidUserError, MissingSessionError, EmptyMessageError } = require('../../utils/workingMemory/errors');
 const { env } = require('../../config/env');
 
@@ -44,6 +45,8 @@ const strictRetriever = require('./retrieval/strictRetriever');
 const memoryOrchestrator = require('./utils/memoryRetrievelOrchestrator');
 const antiRepetition = require('./utils/antiRepetitionTracker');
 const { isMemoryEligible } = require('./memoryStabilityGate');
+const { retrieveMemoryContext, saveConversationMemory } = require('./application');
+const { INFRASTRUCTURE_FAILURES } = require('./application/memoryWriteAdapterContract');
 
 // ── Config ─────────────────────────────────────────────────────────
 const DEFAULT_TTL           = env.shortTermMemoryTTL;          // 25 minutes for conversation turns
@@ -52,6 +55,7 @@ const SNAPSHOT_INTERVAL_MS  = 15 * 60 * 1000; // 15 minutes
 const IDLE_TIMEOUT_MS       = 22 * 60 * 1000; // 22 minutes
 
 const stmSessionStates = new Map();
+const canonicalWriteJobs = new Map();
 
 function _makeSessionKey(userId, sessionId) {
   return `${userId}:${sessionId}`;
@@ -152,6 +156,150 @@ function _buildStmSnapshot(sessionId, turns) {
     characterCount,
     estimatedTokens,
     rawConversation: turns,
+  };
+}
+
+function _compareShadowRetrieval(oldResult = {}, canonicalResult = {}) {
+  const oldMemories = Array.isArray(oldResult.allMemories) ? oldResult.allMemories : [];
+  const newMemories = Array.isArray(canonicalResult.memories) ? canonicalResult.memories : [];
+
+  return {
+    oldHasData: oldMemories.length > 0,
+    newHasData: newMemories.length > 0,
+    oldCount: oldMemories.length,
+    newCount: newMemories.length,
+    oldContextLength: Number(oldResult.context?.length || 0),
+    newContextLength: Number(canonicalResult.context?.length || 0),
+    oldSources: oldResult.source || null,
+    newSource: canonicalResult.source || null,
+    oldTypes: [...new Set(oldMemories.map((memory) => String(memory?.type || '').trim()).filter(Boolean).slice(0, 8))],
+    newTypes: [...new Set(newMemories.map((memory) => String(memory?.type || '').trim()).filter(Boolean).slice(0, 8))],
+  };
+}
+
+function resolveCanonicalReadMode() {
+  const configuredMode = String(env.memoryCanonicalReadMode || 'legacy').trim().toLowerCase();
+  if (['legacy', 'shadow', 'canonical', 'canonical_with_legacy_fallback'].includes(configuredMode)) {
+    return configuredMode;
+  }
+  return env.memoryCanonicalReadEnabled ? 'canonical' : 'legacy';
+}
+
+function buildSafeEmptyMemoryContext() {
+  return {
+    systemPrompt: '',
+    facts: [],
+    task: null,
+    turnCount: 0,
+    contextPacket: null,
+    memoryRevision: 0,
+    contextMemoryRevision: 0,
+    source: 'none',
+    memoryStatus: 'NO_MEMORY',
+    ok: true,
+  };
+}
+
+function buildFailedMemoryContext(error) {
+  return {
+    systemPrompt: '',
+    facts: [],
+    task: null,
+    turnCount: 0,
+    contextPacket: null,
+    memoryRevision: 0,
+    contextMemoryRevision: 0,
+    source: 'none',
+    memoryStatus: 'RETRIEVAL_FAILURE',
+    errorCode: error?.code || error?.name || 'MEMORY_RETRIEVAL_FAILURE',
+    ok: false,
+  };
+}
+
+function buildContextFromLegacyResult(result = {}) {
+  if (!result || typeof result !== 'object') {
+    return buildSafeEmptyMemoryContext();
+  }
+
+  return {
+    systemPrompt: result.context || '',
+    facts: result.allMemories || [],
+    task: null,
+    turnCount: result.retrievedMemoriesCount || 0,
+    contextPacket: result.contextPacket || null,
+    memoryRevision: result.memoryRevision || 0,
+    contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
+    source: result.source || 'legacy',
+    ok: true,
+  };
+}
+
+async function loadAuthenticatedIdentity(userId, traceId = 'untraced') {
+  const startedAt = Date.now();
+  try {
+    const user = await UserModel.findById(userId).select('firstName lastName displayName').lean();
+    const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() || user?.displayName || '';
+    const status = fullName ? 'AVAILABLE' : (user ? 'NO_PROFILE_NAME' : 'PROFILE_NOT_FOUND');
+    console.info('[MEMORY_IDENTITY_LOOKUP]', JSON.stringify({
+      traceId,
+      status,
+      elapsedMs: Date.now() - startedAt,
+    }));
+    return { fullName, status, elapsedMs: Date.now() - startedAt };
+  } catch (error) {
+    const lookupError = new Error('Authoritative user profile lookup failed.');
+    lookupError.code = 'USER_PROFILE_LOOKUP_FAILED';
+    console.warn('[MEMORY_IDENTITY_LOOKUP]', JSON.stringify({
+      traceId,
+      status: 'failure',
+      failureCode: error?.code || error?.name || 'USER_PROFILE_LOOKUP_FAILED',
+      elapsedMs: Date.now() - startedAt,
+    }));
+    throw lookupError;
+  }
+}
+
+function buildAuthenticatedIdentityContext(identity, canonicalContext = '') {
+  const existingSections = String(canonicalContext || '')
+    .split(/\r?\n\r?\n/)
+    .map((section) => section.trim())
+    .filter((section) => section && !section.startsWith('=== Authenticated Identity ==='));
+  const contextWithoutIdentity = existingSections.join('\n\n');
+  const identitySection = identity?.fullName
+    ? `=== Authenticated Identity ===\nUser full name: ${identity.fullName}`
+    : '';
+
+  return [identitySection, contextWithoutIdentity].filter(Boolean).join('\n\n');
+}
+
+function withAuthenticatedIdentity(result, identity) {
+  const systemPrompt = buildAuthenticatedIdentityContext(identity, result.systemPrompt || result.context || '');
+  return {
+    ...result,
+    systemPrompt,
+    context: systemPrompt,
+    identityStatus: identity.status,
+    identityLookupMs: identity.elapsedMs,
+  };
+}
+
+function buildContextFromCanonicalResult(canonical = {}) {
+  const memories = Array.isArray(canonical.memories) ? canonical.memories : [];
+  return {
+    systemPrompt: canonical.context || '',
+    facts: memories,
+    task: null,
+    turnCount: memories.length,
+    contextPacket: null,
+    memoryRevision: 0,
+    contextMemoryRevision: 0,
+    source: canonical.source || 'canonical',
+    memoryStatus: canonical.ok === false
+      ? 'RETRIEVAL_FAILURE'
+      : (memories.length ? 'MEMORY_FOUND' : 'NO_MEMORY'),
+    retrievalMetadata: canonical.metadata || null,
+    errorCode: canonical.error?.code || null,
+    ok: canonical.ok !== false,
   };
 }
 
@@ -316,9 +464,204 @@ function _validateTurnInputs(userId, sessionId, userMessage, aiResponse) {
 // Runs after the conversation turn is already saved to Redis.
 // Never throws — errors are logged internally.
 // ───────────────────────────────────────────────────────────────────
-function _runBackgroundExtraction(userId, sessionId, userMessage, aiResponse, turnId) {
-  // Disabled for Phase 1. Persistence is intentionally raw and deterministic.
-  return undefined;
+async function _runBackgroundExtraction(userId, sessionId, userMessage, aiResponse, turnId) {
+  const semanticStatus = {
+    status: 'NOT_MEMORY_WORTHY',
+    saved: false,
+    count: 0,
+    dependency: null,
+    queued: false,
+  };
+
+  try {
+    const { extractMemoryCandidates, extractCanonicalSemanticMemories } = require('./extraction');
+    const { shouldUseSemanticUnderstanding, understandUserMemory } = require('./semanticMemoryUnderstanding');
+
+    const userExtracted = extractMemoryCandidates(userMessage, { sourceTurnId: turnId, sourceRole: 'user' });
+    const assistantExtracted = extractMemoryCandidates(aiResponse, { sourceTurnId: turnId, sourceRole: 'assistant' });
+    if (!userExtracted.length && !assistantExtracted.length) {
+      return semanticStatus;
+    }
+
+    const deterministicUserCanonicalGroup = /[?؟]$/.test(String(userMessage || '').trim())
+      ? {}
+      : extractCanonicalSemanticMemories(userMessage, { sourceTurnId: turnId, sourceRole: 'user' });
+
+    const semanticUserCanonicalGroup = shouldUseSemanticUnderstanding(userMessage, deterministicUserCanonicalGroup)
+      ? await Promise.race([
+          understandUserMemory(userMessage, { userId, sourceTurnId: turnId }),
+          new Promise((resolve) => setTimeout(() => resolve(null), 1500)),
+        ])
+      : null;
+
+    const userCanonicalGroup = semanticUserCanonicalGroup === null
+      ? deterministicUserCanonicalGroup
+      : (Object.keys(semanticUserCanonicalGroup || {}).length ? semanticUserCanonicalGroup : {});
+
+    if (semanticUserCanonicalGroup === null && Object.keys(deterministicUserCanonicalGroup).length === 0) {
+      semanticStatus.status = 'UNAVAILABLE_DEPENDENCY';
+      semanticStatus.dependency = 'semantic_understanding';
+    }
+
+    const userCanonicalEntries = Object.values(userCanonicalGroup || {}).flat();
+    if (userCanonicalEntries.length) {
+      semanticStatus.status = 'STORAGE_FAILURE';
+      const saved = await WorkingMemoryRedis.upsertSemanticMemories(userId, userCanonicalGroup, { source: 'user', turnId });
+      semanticStatus.saved = saved > 0;
+      semanticStatus.count = saved;
+      semanticStatus.status = saved > 0 ? 'SUCCESS' : 'STORAGE_FAILURE';
+    } else if (semanticStatus.status !== 'UNAVAILABLE_DEPENDENCY') {
+      semanticStatus.status = 'NOT_MEMORY_WORTHY';
+    }
+
+    return semanticStatus;
+  } catch (candidateError) {
+    const message = String(candidateError?.message || '');
+    semanticStatus.status = /gemini/i.test(message) ? 'UNAVAILABLE_DEPENDENCY' : 'STORAGE_FAILURE';
+    semanticStatus.dependency = candidateError?.code || candidateError?.name || 'semantic_pipeline';
+    return semanticStatus;
+  }
+}
+
+function resolveCanonicalWriteMode() {
+  const mode = String(env.memoryCanonicalWriteMode || 'legacy').trim().toLowerCase();
+  return ['legacy', 'shadow', 'canonical', 'canonical_with_legacy_fallback'].includes(mode)
+    ? mode
+    : 'legacy';
+}
+
+function logCanonicalWrite(mode, result) {
+  const metadata = result?.metadata || {};
+  const diagnostic = {
+    mode,
+    turnId: metadata.turnId || null,
+    status: result?.status || 'EXTRACTION_FAILURE',
+    extractionDecision: metadata.extractionDecision || 'UNAVAILABLE',
+    extractionFailureCode: metadata.extractionFailureCode || null,
+    consolidationDecisions: Array.isArray(metadata.decisions)
+      ? metadata.decisions.map((item) => item.decision).slice(0, 12)
+      : [],
+    mongoStatus: metadata.mongoStatus || 'NOT_ATTEMPTED',
+    cacheStatus: metadata.cacheStatus || 'NOT_ATTEMPTED',
+    semanticIndexStatus: metadata.semanticIndexStatus || 'NOT_ATTEMPTED',
+    savedCount: Array.isArray(result?.memories) ? result.memories.length : 0,
+    failureCategory: result?.error?.code || null,
+    latency: metadata.latency || {},
+  };
+
+  if (result?.status === 'EXTRACTION_FAILURE'
+    || result?.status === 'CONSOLIDATION_FAILURE'
+    || result?.status === 'MONGO_FAILURE') {
+    console.warn('[MEMORY_CANONICAL_WRITE]', JSON.stringify(diagnostic));
+  } else {
+    console.info('[MEMORY_CANONICAL_WRITE]', JSON.stringify(diagnostic));
+  }
+}
+
+function scheduleCanonicalWrite({
+  mode,
+  userId,
+  sessionId,
+  userMessage,
+  aiResponse,
+  timestamp,
+  source,
+  turnId,
+}) {
+  const jobKey = `${userId}:${turnId}`;
+  if (canonicalWriteJobs.has(jobKey)) {
+    return false;
+  }
+
+  const job = new Promise((resolve) => setImmediate(resolve))
+    .then(() => saveConversationMemory({
+        userId,
+        sessionId,
+        userMessage,
+        assistantMessage: aiResponse,
+        timestamp,
+        source,
+        options: {
+          conversationTurnId: turnId,
+          dryRun: mode === 'shadow',
+        },
+      }))
+    .then(async (result) => {
+      logCanonicalWrite(mode, result);
+      if (mode === 'canonical_with_legacy_fallback'
+        && INFRASTRUCTURE_FAILURES.has(result?.status)) {
+        const legacyResult = await _runBackgroundExtraction(
+          userId,
+          sessionId,
+          userMessage,
+          aiResponse,
+          turnId,
+        );
+        console.info('[MEMORY_LEGACY_WRITE_FALLBACK]', JSON.stringify({
+          mode,
+          status: legacyResult?.status || 'STORAGE_FAILURE',
+          saved: Boolean(legacyResult?.saved),
+          count: Number(legacyResult?.count) || 0,
+          failureCategory: result.status,
+        }));
+      }
+    })
+    .catch(async () => {
+        const failed = {
+          status: 'EXTRACTION_FAILURE',
+          error: { code: 'EXTRACTION_FAILURE' },
+          metadata: { extractionDecision: 'THREW' },
+        };
+        logCanonicalWrite(mode, failed);
+        if (mode === 'canonical_with_legacy_fallback') {
+          try {
+            const legacyResult = await _runBackgroundExtraction(
+              userId,
+              sessionId,
+              userMessage,
+              aiResponse,
+              turnId,
+            );
+            console.info('[MEMORY_LEGACY_WRITE_FALLBACK]', JSON.stringify({
+              mode,
+              status: legacyResult?.status || 'STORAGE_FAILURE',
+              saved: Boolean(legacyResult?.saved),
+              count: Number(legacyResult?.count) || 0,
+              failureCategory: 'EXTRACTION_FAILURE',
+            }));
+          } catch {
+            console.warn('[MEMORY_LEGACY_WRITE_FALLBACK]', JSON.stringify({
+              mode,
+              status: 'STORAGE_FAILURE',
+              failureCategory: 'LEGACY_WRITE_FAILURE',
+            }));
+          }
+        }
+    })
+    .finally(() => {
+      canonicalWriteJobs.delete(jobKey);
+    });
+
+  canonicalWriteJobs.set(jobKey, job);
+  return true;
+}
+
+async function drainCanonicalWriteJobs(timeoutMs = 8000) {
+  const pending = [...canonicalWriteJobs.values()];
+  if (!pending.length) return { drained: true, pending: 0 };
+
+  let timeout;
+  const completed = await Promise.race([
+    Promise.allSettled(pending).then(() => true),
+    new Promise((resolve) => {
+      timeout = setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]);
+  if (timeout) clearTimeout(timeout);
+  return {
+    drained: completed,
+    pending: completed ? 0 : canonicalWriteJobs.size,
+  };
 }
 
 // Legacy compatibility helpers live below. Core prompt assembly uses
@@ -343,7 +686,16 @@ const MemoryService = {
    * @param {number} [opts.ttl]         — seconds, default 3600
    * @returns {Promise<{success:boolean, memorySaved:boolean, turnId:string|null, totalTurns:number, ttl:number}>}
    */
-  async saveTurn({ userId, sessionId, userMessage, aiResponse, ttl = DEFAULT_TTL, conversationTurnId = null }) {
+  async saveTurn({
+    userId,
+    sessionId,
+    userMessage,
+    aiResponse,
+    ttl = DEFAULT_TTL,
+    conversationTurnId = null,
+    timestamp = null,
+    source = 'CONVERSATION',
+  }) {
     if (!userId || !sessionId) {
       return { success: false, memorySaved: false, turnId: null, totalTurns: 0, ttl, timestamp: new Date().toISOString(), skipped: true, reason: 'missing_user_or_session' };
     }
@@ -382,6 +734,8 @@ const MemoryService = {
       }
 
 
+      const mode = resolveCanonicalWriteMode();
+      const occurredAt = timestamp || new Date().toISOString();
       const output = {
         success:     true,
         memorySaved: true,
@@ -389,83 +743,53 @@ const MemoryService = {
         totalTurns:  result.totalTurns,
         ttl,
         timestamp:   new Date().toISOString(),
-        stm: { status: 'SUCCESS', saved: true, turnId: result.turnId },
-        canonicalSemantic: semanticStatus,
+        stm: { status: 'SUCCESS', saved: true, turnId: result.turnId, latencyMs: saveDurationMs },
+        canonicalSemantic: {
+          status: 'QUEUED',
+          saved: false,
+          count: 0,
+          dependency: 'semantic_pipeline',
+          queued: true,
+        },
       };
 
-      try {
-        const { extractMemoryCandidates, extractCanonicalSemanticMemories } = require('./extraction');
-        const { shouldUseSemanticUnderstanding, understandUserMemory } = require('./semanticMemoryUnderstanding');
-        
-        // CRITICAL FIX: Extract from user message and assistant message SEPARATELY
-        // with source tracking. Never mix AI-generated text with user assertions about identity.
-        
-        // Process user message (primary evidence source for identity)
-        const userExtracted = extractMemoryCandidates(userMessage, { 
-          sourceTurnId: result.turnId,
-          sourceRole: 'user'  // User-originated statement
-        });
-        if (userExtracted.length) {
-        }
-
-        // Process assistant message (lower priority for identity, only for contextual facts)
-        const assistantExtracted = extractMemoryCandidates(aiResponse, { 
-          sourceTurnId: result.turnId,
-          sourceRole: 'assistant'  // AI-generated text
-        });
-        if (assistantExtracted.length) {
-        }
-
-        // Extract canonical memories from user message only (primary identity source)
-        const deterministicUserCanonicalGroup = /[?؟]$/.test(String(userMessage || '').trim())
-          ? {}
-          : extractCanonicalSemanticMemories(userMessage, { 
-          sourceTurnId: result.turnId,
-          sourceRole: 'user'
-        });
-        const semanticUserCanonicalGroup = shouldUseSemanticUnderstanding(userMessage, deterministicUserCanonicalGroup)
-          ? await understandUserMemory(userMessage, { userId, sourceTurnId: result.turnId })
-          : null;
-        const userCanonicalGroup = semanticUserCanonicalGroup === null
-          ? deterministicUserCanonicalGroup
-          : (Object.keys(semanticUserCanonicalGroup).length ? semanticUserCanonicalGroup : {});
-        if (semanticUserCanonicalGroup === null && Object.keys(deterministicUserCanonicalGroup).length === 0) {
-          semanticStatus.status = 'UNAVAILABLE_DEPENDENCY';
-          semanticStatus.dependency = 'semantic_understanding';
-        }
-        const userCanonicalEntries = Object.values(userCanonicalGroup).flat();
-        
-        if (userCanonicalEntries.length) {
-          semanticStatus.status = 'STORAGE_FAILURE';
-          const saved = await WorkingMemoryRedis.upsertSemanticMemories(userId, userCanonicalGroup, { source: 'user', turnId: result.turnId });
-          semanticStatus.saved = saved > 0;
-          semanticStatus.count = saved;
-          semanticStatus.status = saved > 0 ? 'SUCCESS' : 'STORAGE_FAILURE';
-          const postSaveSemantic = await WorkingMemoryRedis.getSemanticMemories(userId);
-          const postSaveEntries = Object.values(postSaveSemantic || {}).flat().filter(Boolean);
-        } else {
-          if (semanticStatus.status !== 'UNAVAILABLE_DEPENDENCY') {
-            semanticStatus.status = 'NOT_MEMORY_WORTHY';
-          }
-        }
-
-        // Assistant output remains conversation/episodic evidence, never canonical user truth.
-        const assistantCanonicalGroup = extractCanonicalSemanticMemories(aiResponse, { 
-          sourceTurnId: result.turnId,
-          sourceRole: 'assistant'
-        });
-        
-        const assistantCanonicalEntries = Object.values(assistantCanonicalGroup).flat();
-        if (assistantCanonicalEntries.length) {
-        }
-      } catch (candidateError) {
-        semanticStatus.status = candidateError?.message?.toLowerCase().includes('gemini')
-          ? 'UNAVAILABLE_DEPENDENCY'
-          : 'STORAGE_FAILURE';
-        semanticStatus.dependency = candidateError?.code || candidateError?.name || 'semantic_pipeline';
+      if (mode === 'legacy' || mode === 'shadow') {
+        const backgroundSemanticStatus = _runBackgroundExtraction(
+          userId, sessionId, userMessage, aiResponse, result.turnId
+        );
+        const semanticStatusResult = await Promise.race([
+          backgroundSemanticStatus,
+          new Promise((resolve) => {
+            setTimeout(() => resolve({
+              status: 'QUEUED',
+              saved: false,
+              count: 0,
+              dependency: 'semantic_pipeline',
+              queued: true,
+              timedOut: true,
+            }), 1200);
+          }),
+        ]);
+        output.canonicalSemantic = semanticStatusResult || output.canonicalSemantic;
       }
 
-      output.canonicalSemantic = semanticStatus;
+      if (mode !== 'legacy') {
+        scheduleCanonicalWrite({
+          mode,
+          userId,
+          sessionId,
+          userMessage,
+          aiResponse,
+          timestamp: occurredAt,
+          source,
+          turnId: conversationTurnId || result.turnId,
+        });
+        output.canonicalWrite = {
+          mode,
+          status: 'QUEUED',
+          queued: true,
+        };
+      }
 
       return output;
 
@@ -549,7 +873,7 @@ const MemoryService = {
       }
 
       const turns = await WorkingMemoryRedis.getRecentMemory(userId);
-      const rankedMemories = Array.isArray(turns) ? turns.slice(0, limit).reverse() : [];
+      const rankedMemories = Array.isArray(turns) ? [...turns].slice(0, limit) : [];
       const memoriesFound = rankedMemories.length;
 
 
@@ -575,7 +899,7 @@ const MemoryService = {
       }
 
       const turns = await WorkingMemoryRedis.getRecentMemory(userId);
-      const recentTurns = Array.isArray(turns) ? turns.slice(0, limit) : [];
+      const recentTurns = Array.isArray(turns) ? [...turns].slice(0, limit) : [];
       const turnContext = recentTurns.map((turn) => {
         const assistant = String(turn.aiResponse || turn.assistantResponse || turn.assistantMessage || '').trim();
         return `User: ${turn.userMessage}\nAssistant: ${assistant}\n\n`;
@@ -767,33 +1091,122 @@ const MemoryService = {
       return { systemPrompt: '', facts: [], task: null, turnCount: 0, contextPacket: null, memoryEligible: false, skipped: true, reason: 'missing_user_id' };
     }
 
+    let identity;
+    try {
+      identity = await loadAuthenticatedIdentity(userId, String(opts.traceId || 'untraced'));
+    } catch (error) {
+      return {
+        ...buildFailedMemoryContext(error),
+        identityStatus: 'LOOKUP_FAILED',
+      };
+    }
+
     if (sessionId && !isMemoryEligible(userId, sessionId)) {
-      return { systemPrompt: '', facts: [], task: null, turnCount: 0, contextPacket: null, memoryEligible: false, skipped: true, reason: 'memory_gate_closed' };
+      return withAuthenticatedIdentity({
+        ...buildSafeEmptyMemoryContext(),
+        memoryStatus: 'MEMORY_GATE_CLOSED',
+        memoryEligible: false,
+        skipped: true,
+        reason: 'memory_gate_closed',
+      }, identity);
     }
 
     try {
-      if (!userId) return { systemPrompt: '', facts: [], task: null, turnCount: 0, contextPacket: null };
+      const mode = resolveCanonicalReadMode();
+      const canonicalOptions = {
+        maxMemories: 6,
+        maxContextLength: 1800,
+        traceId: String(opts.traceId || 'untraced'),
+      };
 
-      // Use new intelligent retrieval orchestrator
+      if (mode === 'legacy') {
+        const result = await memoryOrchestrator.retrieveMemoryWithEscalation(
+          userId,
+          sessionId,
+          userQuery,
+          { isLiveContext, activeContext }
+        );
+        const legacyContext = buildContextFromLegacyResult(result);
+        return withAuthenticatedIdentity(legacyContext, identity);
+      }
+
+      if (mode === 'shadow') {
+        const legacyResult = await memoryOrchestrator.retrieveMemoryWithEscalation(
+          userId,
+          sessionId,
+          userQuery,
+          { isLiveContext, activeContext }
+        );
+
+        try {
+          const canonical = await retrieveMemoryContext({
+            userId,
+            query: userQuery || '',
+            sessionId,
+            options: canonicalOptions,
+          });
+          if (canonical && canonical.ok !== undefined) {
+            _compareShadowRetrieval(legacyResult || {}, canonical || {});
+          }
+        } catch {
+          // shadow diagnostics are intentionally non-blocking
+        }
+        const legacyContext = buildContextFromLegacyResult(legacyResult);
+        return withAuthenticatedIdentity(legacyContext, identity);
+      }
+
+      if (mode === 'canonical') {
+        const canonical = await retrieveMemoryContext({
+          userId,
+          query: userQuery || '',
+          sessionId,
+          options: canonicalOptions,
+        });
+
+        if (canonical && canonical.ok === false) {
+          return withAuthenticatedIdentity(buildContextFromCanonicalResult(canonical), identity);
+        }
+
+        const canonicalResult = canonical || { ok: true, memories: [], context: '', source: 'none' };
+        return withAuthenticatedIdentity(buildContextFromCanonicalResult(canonicalResult), identity);
+      }
+
+      if (mode === 'canonical_with_legacy_fallback') {
+        const canonical = await retrieveMemoryContext({
+          userId,
+          query: userQuery || '',
+          sessionId,
+          options: canonicalOptions,
+        });
+
+        if (canonical && canonical.ok === true) {
+          return withAuthenticatedIdentity(buildContextFromCanonicalResult(canonical), identity);
+        }
+
+        try {
+          const legacyResult = await memoryOrchestrator.retrieveMemoryWithEscalation(
+            userId,
+            sessionId,
+            userQuery,
+            { isLiveContext, activeContext }
+          );
+          const legacyContext = buildContextFromLegacyResult(legacyResult);
+          return withAuthenticatedIdentity(legacyContext, identity);
+        } catch (error) {
+          return withAuthenticatedIdentity(buildFailedMemoryContext(error), identity);
+        }
+      }
+
       const result = await memoryOrchestrator.retrieveMemoryWithEscalation(
         userId,
         sessionId,
         userQuery,
         { isLiveContext, activeContext }
       );
-
-      return {
-        systemPrompt: result.context,
-        facts: result.allMemories || [],
-        task: null,
-        turnCount: result.retrievedMemoriesCount || 0,
-        contextPacket: result.contextPacket || null,
-        memoryRevision: result.memoryRevision || 0,
-        contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
-      };
-
+      const legacyContext = buildContextFromLegacyResult(result);
+      return withAuthenticatedIdentity(legacyContext, identity);
     } catch (err) {
-      return { systemPrompt: '', facts: [], task: null, turnCount: 0, contextPacket: null };
+      return withAuthenticatedIdentity(buildFailedMemoryContext(err), identity);
     }
   },
 
@@ -813,3 +1226,4 @@ const MemoryService = {
 };
 
 module.exports = MemoryService;
+MemoryService.drainCanonicalWriteJobs = drainCanonicalWriteJobs;

@@ -1,9 +1,21 @@
 const mongoose = require('mongoose');
-function connectDB() {
+
+async function connectDB() {
   const mongoURI = process.env.MONGODB_URI;
-  mongoose.connect(mongoURI)
-    .then(() => console.log('MongoDB connected'))
-    .catch((err) => console.error('MongoDB connection error:', err));
+
+  if (!mongoURI) {
+    console.error('MongoDB connection URI missing');
+    return false;
+  }
+
+  try {
+    await mongoose.connect(mongoURI);
+    console.log('MongoDB connected');
+    return true;
+  } catch (err) {
+    console.error('MongoDB connection error:', err);
+    return false;
+  }
 }
 
 module.exports = connectDB;

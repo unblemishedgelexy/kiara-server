@@ -40,7 +40,7 @@ function isLikelyFragment(text) {
 
 function computeEvidence(text) {
   const normalized = normalizeText(text);
-  const explicit = /\b(?:main|mujhe|mera|meri|hum|ham|aap|ap|my|naam|name|bhai|behen|friend|project|work|build|develop|pasand|favorite|favourite|preferred|pata|jaanta|skill|goal|aim|improve|learn|sikha|seekhna)\b/.test(normalized);
+  const explicit = /\b(?:main|mujhe|mera|meri|hum|ham|aap|ap|my|naam|name|i\s+am|i'm|bhai|behen|friend|project|work|build|develop|pasand|favorite|favourite|preferred|pata|jaanta|skill|goal|aim|improve|learn|sikha|seekhna)\b/.test(normalized);
   const userAsserted = /\b(?:main|mujhe|mera|meri|hum|ham|aap|ap|my|i\s+am|i'm)\b/.test(normalized) || /\b(?:hai|hoon|hoga|kar raha|kar rahi|pasand|chahiye|chahata|sikha|seekhna)\b/.test(normalized);
   const repeated = /\b(?:repeated|again|har baar|bar bar)\b/.test(normalized);
   const contextual = /(\b(?:bhai|behen|friend|mother|father|sister|brother|project|company|team|college|school|colleague|teacher|partner|wife|husband|naam|skill|goal|redis|distributed|caching)\b)/.test(normalized);
@@ -67,9 +67,9 @@ function classifyCandidate(text, contextText) {
   const normalized = normalizeText(text);
   const context = normalizeText(contextText || '');
 
-  // More strict identity signals - require "naam"/"name" specifically
-  const identitySignals = /(naam|name|call me|mera naam|meri naam|mera naam hai|meri naam hai)/i;
-  
+  // More strict identity signals - require explicit personal-name assertions like "my name is", "I am", or "mera naam"
+  const identitySignals = /(?:\b(?:i\s+am|i'm|my\s+name\s+is|my\s+name|name\s+is|call me|(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+naam|(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+name)\b)/i;
+
   // Relationship signals - more flexible to match patterns like "mera friend [name]" or "[name] mera [relation] hai"
   const relationshipSignals = /(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+(?:friend|bhai|behen|mother|father|uncle|aunt|sister|brother|teacher|colleague|partner|classmate|team\s+member)|(?:friend|bhai|behen|mother|father|uncle|aunt|sister|brother|teacher|colleague|partner|classmate|team\s+member).*\s+(?:hai|hain|ho|hoon)/i;
   
@@ -86,6 +86,10 @@ function classifyCandidate(text, contextText) {
   // Preference patterns (more specific - require actual preference verb forms)
   const preferenceSignals = /(?:pasand\s+(?:hai|nahi)|pasand|like|love|enjoy|favorite|favourite|preferred)/i;
 
+  if (identitySignals.test(normalized) || identitySignals.test(context)) {
+    return 'identity';
+  }
+
   if (projectSignals.test(normalized) || projectSignals.test(context)) {
     return 'project';
   }
@@ -101,10 +105,6 @@ function classifyCandidate(text, contextText) {
 
   if (preferenceSignals.test(normalized) || preferenceSignals.test(context)) {
     return 'preference';
-  }
-
-  if (identitySignals.test(normalized) || identitySignals.test(context)) {
-    return 'identity';
   }
 
   // Check relationship BEFORE falling back to fact
@@ -220,15 +220,14 @@ function extractIdentityName(text) {
   }
 
   const identityPatterns = [
-    /(?:my\s+name\s+is|i\s+am|i'm|this\s+is|(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+naam|main\s+hoon|main\s+hun)\s+([A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F\s'’.-]{1,40}?)(?=\s+(?:hai|hain|hoon|hun|\.|,|$))/i,
-    /(?:naam)\s+([A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F\s'’.-]{1,40}?)(?=\s+(?:hai|hain|hoon|hun|\.|,|$))/i,
-    /(?:name\s+is|naam\s+hai|naam\s+hain)\s+([A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F\s'’.-]{1,40}?)(?=\s+(?:hai|hain|hoon|hun|\.|,|$))/i,
+    /(?:my\s+name\s+is|i\s+am|i'm|this\s+is|(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+naam|(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+name|main\s+hoon|main\s+hun|name\s+is|naam\s+hai|naam\s+hain)\s+([A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F\s'’.-]{1,40}?)(?=\s*(?:hai|hain|hoon|hun|is|are|was|were|\.|,|$))/i,
+    /(?:naam)\s+([A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F\s'’.-]{1,40}?)(?=\s*(?:hai|hain|hoon|hun|is|are|was|were|\.|,|$))/i,
   ];
 
   for (const pattern of identityPatterns) {
     const match = value.match(pattern);
     if (match && match[1]) {
-      const extracted = normalizeText(match[1].replace(/^(?:i\s+am|i'm|main|this is|mera naam|meri naam|aapka naam|tumhara naam|hamara naam)\s+/i, ''));
+      const extracted = normalizeText(match[1].replace(/^(?:i\s+am|i'm|main|this is|mera naam|meri naam|mera name|meri name|aapka naam|tumhara naam|hamara naam)\s+/i, ''));
       if (extracted && !/\b(?:kya|kaun|kis|kyun|kab|kahan|kon)\b/i.test(extracted)) {
         return extracted;
       }
@@ -272,6 +271,13 @@ function extractCanonicalValue(rawText, category) {
   const text = normalizeText(rawText || '');
   if (!text) return null;
 
+  if (category === 'identity') {
+    const directIdentityName = extractIdentityName(text);
+    if (directIdentityName) {
+      return directIdentityName;
+    }
+  }
+
   if (category === 'preference') {
     const preferenceValueMatch = text.match(/\b(?:favorite|favourite|preferred)\s+(?:color|colour|food|drink|book|movie|song|music|place|city|language|sport|game|hobby|artist|author|topic)\s+(?:is|are|:|=)\s*(.+)$/i);
     if (preferenceValueMatch?.[1]) {
@@ -287,7 +293,7 @@ function extractCanonicalValue(rawText, category) {
     }
   }
 
-  if (category === 'identity' || /(?:naam|name)/i.test(text)) {
+  if (/(?:naam|name)/i.test(text)) {
     const directIdentityName = extractIdentityName(text);
     if (directIdentityName) {
       return directIdentityName;
@@ -332,7 +338,7 @@ function extractCanonicalSemanticMemories(rawText, context = {}) {
     }
     let category = String(candidate.category || 'fact');
     const candidateText = normalizeText(candidate.value || '');
-    const explicitNameMatch = /(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+naam\s+([A-Za-z\u0900-\u097F][A-Za-z\u0900-\u097F\s'’.-]{1,40}?)(?=\s+(?:hai|hain|hoon|hun|\.|,|$))/i.exec(candidateText);
+    const explicitNameMatch = /(?:my\s+name\s+is|i\s+am|i'm|name\s+is|(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+naam|(?:mera|meri|mere|aapka|tumhara|tumhari|hamara|hamari)\s+name)/i.test(candidateText);
     if (explicitNameMatch) {
       category = 'identity';
     }

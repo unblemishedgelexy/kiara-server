@@ -19,6 +19,16 @@ class WorkingMemoryMiddleware {
   }
 
   static bindAuthenticatedUser(req, res, next) {
+    if (!req.body || typeof req.body !== 'object') {
+      req.body = {};
+    }
+    if (!req.query || typeof req.query !== 'object') {
+      req.query = {};
+    }
+    if (!req.params || typeof req.params !== 'object') {
+      req.params = {};
+    }
+
     const authenticatedUserId = req.userId ? String(req.userId).trim() : '';
 
     if (!authenticatedUserId) {
@@ -63,6 +73,10 @@ class WorkingMemoryMiddleware {
    */
   static validateSaveRequest(req, res, next) {
     try {
+      if (!req.body || typeof req.body !== 'object') {
+        req.body = {};
+      }
+
       if (!require('../../config/env').env.liveMemoryEnabled) {
         return res.status(200).json({
           success: true,

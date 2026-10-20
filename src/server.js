@@ -4,6 +4,9 @@ const { env } = require('./config/env');
 const promotionWorker = require('./services/memory/promotion/promotionWorker');
 const WorkingMemoryRedis = require('./services/workingMemory/redisOperations');
 const { ensureSubscriptionIndexes } = require('./services/subscriptions/subscriptionIndexes');
+const MemoryService = require('./services/memory');
+const redisService = require('./services/infrastructure/redisService');
+const mongoose = require('mongoose');
 
 async function startServer() {
   const dbConnected = await connectDB();
@@ -35,9 +38,50 @@ async function startServer() {
   const app = createApp();
   const port = env.port || 4000;
 
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log('[SERVER_START]', `http://localhost:${port}`);
   });
+  server.requestTimeout = 15 * 60 * 1000;
+
+  let shutdownPromise = null;
+  const shutdown = (signal) => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      console.info('[SERVER_SHUTDOWN]', JSON.stringify({ signal }));
+      const forceExit = setTimeout(() => {
+        console.error('[SERVER_SHUTDOWN]', 'Graceful shutdown timed out.');
+        process.exit(1);
+      }, 15000);
+
+      promotionWorker.stopPromotionWorker();
+      WorkingMemoryRedis.stopRejectedMemoryCleanupScheduler();
+
+      const serverClosed = new Promise((resolve) => server.close(resolve));
+      const memoryDrain = MemoryService.drainCanonicalWriteJobs(8000);
+      const [drainResult] = await Promise.all([
+        memoryDrain,
+        serverClosed,
+      ]);
+      if (!drainResult.drained) {
+        console.warn('[SERVER_SHUTDOWN]', JSON.stringify({
+          pendingCanonicalMemoryWrites: drainResult.pending,
+        }));
+      }
+
+      await Promise.allSettled([
+        redisService.closeRedis(),
+        mongoose.disconnect(),
+      ]);
+      clearTimeout(forceExit);
+    })().catch((error) => {
+      console.error('[SERVER_SHUTDOWN]', error?.name || 'shutdown_error');
+      process.exitCode = 1;
+    });
+    return shutdownPromise;
+  };
+
+  process.once('SIGINT', () => { void shutdown('SIGINT'); });
+  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
 }
 
 startServer().catch((error) => {

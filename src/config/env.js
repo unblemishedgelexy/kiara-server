@@ -46,6 +46,7 @@ const defaultClientOrigins = [
 ];
 
 const nodeEnv = readEnv('NODE_ENV', 'development');
+const isNodeTest = process.env.NODE_TEST_CONTEXT === 'child-v8' || nodeEnv === 'test';
 
 const env = {
   allowedOrigins: mergeLists(
@@ -55,6 +56,7 @@ const env = {
   elevenLabsApiKey: readEnv('ELEVENLABS_API_KEY'),
   elevenLabsVoiceId: readEnv('ELEVENLABS_VOICE_ID'),
   geminiApiKey: readEnv('GEMINI_API_KEY'),
+  groqApiKey: readEnv('GROQ_API_KEY'),
   geminiLiveModel: readEnv('GEMINI_LIVE_MODEL', ''),
   geminiLiveVoice: readEnv('GEMINI_LIVE_VOICE', ''),
   geminiEmbeddingModel: readEnv('GEMINI_EMBEDDING_MODEL', ''),
@@ -93,6 +95,8 @@ const env = {
   redisUrl: readEnv('REDIS_URL', ''),
   redisPassword: readEnv('REDIS_PASSWORD', ''),
   liveMemoryEnabled: readEnv('LIVE_MEMORY_ENABLED', 'true').toLowerCase() === 'true',
+  memoryGroqQueryPlannerEnabled: nodeEnv === 'development' && !isNodeTest
+    && readEnv('MEMORY_GROQ_QUERY_PLANNER_ENABLED', 'false').toLowerCase() === 'true',
   enablePinecone: readEnv('ENABLE_PINECONE', 'true').toLowerCase() === 'true',
   enableQueue: readEnv('ENABLE_QUEUE', 'true').toLowerCase() === 'true',
   certificationMode: readEnv('CERTIFICATION_MODE', 'false').toLowerCase() === 'true',
@@ -102,14 +106,18 @@ const env = {
   enableProfileCache: readEnv('ENABLE_PROFILE_CACHE', 'true').toLowerCase() === 'true',
   enableUnfinishedContext: readEnv('ENABLE_UNFINISHED_CONTEXT', 'true').toLowerCase() === 'true',
   enableMemoryLab: readEnv('ENABLE_MEMORY_LAB', nodeEnv === 'production' ? 'false' : 'true').toLowerCase() === 'true',
+  memoryCanonicalReadEnabled: readEnv('MEMORY_CANONICAL_READ_ENABLED', 'false').toLowerCase() === 'true',
+  memoryCanonicalReadMode: readEnv('MEMORY_CANONICAL_READ_MODE', 'legacy').toLowerCase(),
+  memoryCanonicalWriteMode: readEnv('MEMORY_CANONICAL_WRITE_MODE', 'legacy').toLowerCase(),
   bootstrapVersion: readNumber('BOOTSTRAP_VERSION', 1),
   // Memory TTL Configuration
   shortTermMemoryTTL: readNumber('SHORT_TERM_MEMORY_TTL', 1500), // 25 minutes
+  memoryCacheTtlSeconds: readNumber('MEMORY_CACHE_TTL_SECONDS', 3600),
   // Short-term memory retrieval character budget (controls how many characters are returned)
   shortTermMemoryCharBudget: readNumber('SHORT_TERM_MEMORY_CHAR_BUDGET', 4000),
   pineconeApiKey: readEnv('PINECONE_API_KEY', ''),
   pineconeIndexName: readEnv('PINECONE_INDEX_NAME', 'kiara-long-term-memory'),
-  pineconeVectorDimension: readNumber('PINECONE_VECTOR_DIMENSION', 3072),
+  pineconeVectorDimension: readNumber('PINECONE_VECTOR_DIMENSION', 1024),
   pineconeEnvironment: readEnv('PINECONE_ENVIRONMENT', ''),
   pineconeCloud: readEnv('PINECONE_CLOUD', ''),
   pineconeRegion: readEnv('PINECONE_REGION', ''),

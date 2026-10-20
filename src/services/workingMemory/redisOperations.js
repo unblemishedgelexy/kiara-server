@@ -6,6 +6,7 @@
  */
 
 const redisService = require('../infrastructure/redisService');
+const mongoose = require('mongoose');
 const ConversationTurn = require('../../models/ConversationTurn');
 const { env } = require('../../config/env');
 const {
@@ -25,7 +26,26 @@ const REJECTED_MEMORY_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60; // 24 hours
 const SEMANTIC_WRITE_LOCK_TTL_SECONDS = 15;
 const SEMANTIC_WRITE_LOCK_RETRIES = 200;
 const SEMANTIC_WRITE_LOCK_RETRY_MS = 50;
+const STM_MONGO_BACKUP_TIMEOUT_MS = 2000;
 let rejectedMemoryCleanupTimer = null;
+
+async function withTimeout(promise, timeoutMs) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          const error = new Error('STM Mongo backup timed out.');
+          error.code = 'STM_MONGO_BACKUP_TIMEOUT';
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 function relatedHasMemoryId(related, memoryId) {
   return Array.from(related.values()).some((item) => item.memoryId === String(memoryId) || item.id === String(memoryId));
@@ -377,6 +397,8 @@ class WorkingMemoryRedis {
           timestamp: parsedDate.toISOString(),
           userMessage: String(userMessage).replace(/\\n/g, '\n'),
           assistantMessage: String(assistantMessage).replace(/\\n/g, '\n'),
+          assistantResponse: String(assistantMessage).replace(/\\n/g, '\n'),
+          aiResponse: String(assistantMessage).replace(/\\n/g, '\n'),
         };
       }
     }
@@ -526,8 +548,9 @@ class WorkingMemoryRedis {
       }
 
       // Persist to Mongo (backup)
-      try {
-        await ConversationTurn.create({
+      if (mongoose.connection.readyState === 1) {
+        const mongoStartedAt = Date.now();
+        const backupWrite = ConversationTurn.create({
           userId,
           sessionId,
           userMessage,
@@ -540,13 +563,23 @@ class WorkingMemoryRedis {
             timestamp,
           },
         });
-      } catch (mongoError) {
+        backupWrite.catch(() => {});
+        try {
+          await withTimeout(backupWrite, STM_MONGO_BACKUP_TIMEOUT_MS);
+        } catch (mongoError) {
+          console.warn('[STM_MONGO_BACKUP]', JSON.stringify({
+            status: 'FAILED',
+            elapsedMs: Date.now() - mongoStartedAt,
+            errorName: mongoError?.name || 'Error',
+            errorCode: mongoError?.code || null,
+          }));
+        }
       }
 
-    try {
-      await this.enqueuePromotionCandidate(userId);
-    } catch (queueError) {
-    }
+      try {
+        await this.enqueuePromotionCandidate(userId);
+      } catch (queueError) {
+      }
 
       return {
         success: true,
@@ -636,13 +669,15 @@ class WorkingMemoryRedis {
             timestamp: new Date(timestampValue).toISOString(),
             userMessage,
             assistantMessage,
+            assistantResponse: assistantMessage,
+            aiResponse: assistantMessage,
           });
         } catch (error) {
           continue;
         }
       }
 
-      return selected;
+      return selected.reverse();
     } catch (error) {
       throw error;
     }

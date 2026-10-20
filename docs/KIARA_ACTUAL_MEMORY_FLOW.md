@@ -45,30 +45,33 @@ User speech
   -> memoryAnalyzer / buildEpisode / computeEmbedding / Pinecone
 ```
 
-### Current Live read/prompt path
+Canonical write extraction keeps valid `NO_MEMORY`/`IGNORE` decisions distinct from provider failures and invalid model output. Those failures carry a sanitized failure code and stop before Mongo persistence; they are not reported as successful memory writes.
+
+### Current Live read/prompt path (mode-dependent)
 
 ```text
-Live token request or token refresh with userQuery
+LIVE_SESSION_START / LIVE_SESSION_RECONNECT
   -> liveRoutes.js
   -> liveTokenService.js
   -> geminiService.createLiveEphemeralToken()
-  -> memory stability gate
   -> systemPromptBuilder.buildSystemPrompt()
   -> MemoryService.prepareContext()
-  -> memoryRetrievelOrchestrator.retrieveMemoryWithEscalation()
-  -> Query Analyzer
-  -> Redis STM search
-  -> Redis semantic hash search
-  -> optional Pinecone retriever only when no memories were found
-  -> optional deep search stub, which returns []
-  -> deduplication
-  -> relevance ranking
-  -> anti-repetition filtering
-  -> compressed context
+  -> authenticated User profile identity
+  -> memory stability gate for memory retrieval
+  -> configured read mode
+       -> canonical: retrieveMemoryContext()
+            -> routeMemorySources()
+            -> selected STM and/or canonical/semantic retrieval
+            -> merge, rank, and build unified context
+       -> legacy: memoryRetrievelOrchestrator.retrieveMemoryWithEscalation()
+            -> Query Analyzer -> Redis STM/semantic -> optional Pinecone fallback
+            -> deduplication -> relevance ranking -> anti-repetition -> context
   -> Gemini Live system instruction
 ```
 
-The standalone `retriever.js` is active, but it is not the complete Live retrieval owner. The Live owner is `MemoryService.prepareContext()` plus `memoryRetrievelOrchestrator.js`.
+`LIVE_TOKEN_REFRESH` reuses the server-cached instruction for the authenticated user/session/trace rather than repeating memory retrieval. The issued token's constraints apply to a future Live connection; token issuance does not mutate the instruction of an already-open websocket. If the session prompt cache is unavailable, the refresh path must rebuild the prompt before issuing a token. Prompt initialization failures are returned instead of issuing a context-free authenticated token.
+
+The standalone `retriever.js` is active, but it is not the complete Live retrieval owner. `MemoryService.prepareContext()` selects the configured read mode: canonical retrieval runs through `retrieveMemoryContext()` and its `memoryRetrievalAdapter`, while legacy mode uses `memoryRetrievelOrchestrator.js`. Canonical mode was the path observed in the 2026-10-18 verification below.
 
 ---
 
@@ -461,16 +464,9 @@ The first is on the normal save request. The second is optional, delayed, worker
 
 ## 4.1 Entry point for Live memory reads
 
-**[ACTIVE RUNTIME]** `kiara-server/src/services/live/geminiService.js::createLiveEphemeralToken()` calls `systemPromptBuilder.buildSystemPrompt()` only when:
+**[ACTIVE RUNTIME]** `kiara-server/src/services/live/geminiService.js::createLiveEphemeralToken()` builds the prompt for a new session or reconnect. A token refresh reuses the prompt cached for that user/session/trace and rebuilds only if that cache entry is missing or expired. `MemoryService.prepareContext()` loads the authenticated profile identity independently from whether memory retrieval is eligible.
 
-- a requesting user ID exists,
-- a session ID exists,
-- Gemini is configured,
-- `markLiveSessionHealth()` has made the session healthy,
-- `isMemoryEligible()` returns true,
-- the builder resolves within the 3-second prompt-builder timeout.
-
-The builder then calls `MemoryService.prepareContext()`, which calls `memoryOrchestrator.retrieveMemoryWithEscalation()`.
+The builder calls `MemoryService.prepareContext()`, which reads the authoritative `User` profile and then applies the memory stability gate before calling `memoryOrchestrator.retrieveMemoryWithEscalation()`. A profile lookup failure is surfaced and prevents token issuance; a memory retrieval failure can still produce an identity-only prompt and remains marked as a retrieval failure.
 
 ## 4.2 Query analyzer results for the requested examples
 
@@ -594,8 +590,8 @@ The standalone retriever itself selects namespaces as follows:
 | `kiara-server/src/services/memory/utils/memoryRetrievelOrchestrator.js` | `retrieveMemoryWithEscalation()` | `MemoryService.prepareContext()` | User/session/query/options | Budget metadata and final context envelope | YES | Also acceptance/validation can reach it indirectly | Main Live context orchestration |
 | `kiara-server/src/services/memory/retrieval/promptBuilder.js` | `buildContext()` | `_assembleContext()` inside `memory.service.js`; validation runner | Identity, relationships, facts, episodes, STM | Structured prompt string | Reachable through legacy/compatibility context assembly; not the selected `prepareContext()` Live result | YES via validation | Older structured context formatter; overlaps orchestrator formatting |
 | `kiara-server/src/services/memory/memory.service.js` | `_assembleContext()` | MemoryService context methods | Semantic Redis, relationships, recent turns, long-term results | Calls `promptBuilder.buildContext()` | Reachable in service, but `prepareContext()` uses orchestrator instead | No | Compatibility/alternate assembly path |
-| `kiara-server/src/services/memory/memory.service.js` | `prepareContext()` | `systemPromptBuilder.buildSystemPrompt()` | User/session/query/activeContext | `{ systemPrompt, facts, contextPacket, turnCount }` | YES | No | Primary backend Live context API |
-| `kiara-server/src/services/live/systemPromptBuilder.js` | `buildSystemPrompt()` | `geminiService.createLiveEphemeralToken()` | User/session/trigger/query/activeContext | `{ systemPrompt }` plus response guidelines | YES when gate/trigger permit | No | Primary Live prompt fragment builder |
+| `kiara-server/src/services/memory/memory.service.js` | `prepareContext()` | `systemPromptBuilder.buildSystemPrompt()` | User/session/query/activeContext | `{ systemPrompt, facts, contextPacket, turnCount, identityStatus }` | YES | No | Primary backend Live context API; authoritative profile identity is independent of memory retrieval eligibility |
+| `kiara-server/src/services/live/systemPromptBuilder.js` | `buildSystemPrompt()` | `geminiService.createLiveEphemeralToken()` | User/session/trigger/query/activeContext | `{ systemPrompt }` plus response guidelines and context status | YES for session start/reconnect or refresh cache miss | No | Primary Live prompt fragment builder |
 | `kiara-server/src/services/live/geminiService.js` | `createLiveEphemeralToken()` | `liveTokenService` -> `liveRoutes` | User/session/query/activeContext | Gemini Live token/session config with system instruction | YES | No | Final prompt injection owner |
 | `Kiara-ai/src/ai/conversationMemory.ts` | `buildMemoryContext()` | No caller found in current searched frontend code | Local snapshot/turns | Always `''` | No demonstrated Live effect | No | Legacy/no-op frontend context API |
 | `Kiara-ai/src/ai/conversationMemory.ts` | `primeSessionMemory()` | No active caller found; `realtimeMemory` calls `primeConversationMemory`, not this symbol | Session/context | No output | No demonstrated Live effect | No | Legacy/no-op frontend prompt API |
@@ -1006,6 +1002,76 @@ The actual current system is layered but not unified:
 5. Promotion is conditional on feature flags, timing, recent turns, Gemini/analyzer behavior, embedding, and Pinecone availability.
 6. Live retrieval is orchestrator-owned and prefers Redis STM/semantic records before Pinecone.
 7. `retrieval/retriever.js` is an LTM adapter/fallback, not the sole Live retriever.
-8. `retrieval/promptBuilder.js` remains a reachable alternate formatter, while `memoryRetrievelOrchestrator` produces the context returned by the primary Live `prepareContext()` path.
+8. `retrieval/promptBuilder.js` remains a reachable alternate formatter; the Live `prepareContext()` path selects either the canonical retrieval adapter or the legacy `memoryRetrievelOrchestrator` according to configured read mode.
 9. `KiaraMemoryService.ts` and browser memory are active parallel frontend memory systems, but no current call graph proves they affect backend Gemini memory generation.
 10. Old V6/V7/MemoryProfile/LongTermMemory/API paths that are absent or pre-deleted cannot be treated as current runtime without restoring or externally invoking them.
+
+---
+
+# POST-AUDIT RUNTIME VERIFICATION UPDATE — 2026-10-18
+
+This addendum records the later isolated-account UI verification. It supersedes earlier descriptions in this report wherever they identify `memoryRetrievelOrchestrator` as the sole Live read owner: the observed runtime used `MemoryService.prepareContext()` in canonical-read mode and called the canonical retrieval adapter. No source code or database data was changed for this verification.
+
+## Isolated one-fact verification
+
+The recovered production-like record was checked before testing and remained ACTIVE at version 16, with one record for its `(userId, canonicalId)` pair. Testing used a separate local development account with no prior memories or conversation turns. The recovered account was not used for synthetic writes.
+
+| Check | Result | Evidence |
+|---|---|---|
+| Turn accepted through normal UI conversation path | PASS | User turn persisted in the conversation; save trace `memtrace_mvdwtwj2_q2agxu`. |
+| Extraction/canonical persistence completed | PASS | Canonical write produced memory ID `mem_6be377e4d43e0a8482a45b0ec84ccacfbd0db1b2`. |
+| ACTIVE canonical record and authenticated-user scope | PASS | MongoDB `test.memories` contained the exact ORBIT-ALDER-731 fact as ACTIVE, version 1, scoped to the isolated account. |
+| Retrieval returned the saved fact | FAIL | Retrieval trace `memtrace_mvdwvi7x_6h99am` logged `routing:"NONE"`, `sourcesAttempted:[]`, `memoryCount:0`, and no source failures. |
+| Context included the saved fact | FAIL | Context request `69b184e5-a040-41e3-80e8-a8c87c46e842` returned HTTP 200 with `memoryStatus=NO_MEMORY` and `facts=[]`; authenticated identity was available, but the fact was absent. |
+| Actual assistant response | OBSERVED, NOT MEMORY-VERIFIED | The same Live conversation transcript said, “Oh, I know that one! It was ORBIT ALDER 731. See? Told you I'd remember!” Because retrieval returned no fact and this was the same conversation in which it was stated, this is not evidence of durable-memory recall. |
+
+### Earliest confirmed failure
+
+The failure occurred in source routing, before any retrieval source was called. In the observed canonical read path, `MemoryService.prepareContext()` delegates to `retrieveMemoryContext()`; `memoryRetrievalAdapter.js` calls `routeMemorySources()` and only invokes STM or canonical retrieval when those sources are selected. The runtime trace selected `NONE`, so the canonical fact was not queried in this request. This is the earliest confirmed point where the expected fact was lost.
+
+The current routing rules recognize several explicit lookup and “what did I tell you” forms (`sourceRouter.js`, `DIRECT_FACT_LOOKUP` and `NATURAL_RECALL`), but the exact recall-question text was not retained in the structured retrieval log; only its 69-character length was logged. Therefore the trace proves the route was empty, but does not establish which exact phrase failed to match. This report records a confirmed routing failure and leaves the precise regex mismatch unresolved; no fix is claimed.
+
+Relevant implementation points:
+
+- `kiara-server/src/services/memory/memory.service.js::prepareContext()` selects canonical retrieval in canonical mode and maps an empty successful result to `NO_MEMORY`.
+- `kiara-server/src/services/memory/application/memoryRetrievalAdapter.js::retrieveMemoryContext()` logs routing and source results; it dispatches no source when the route is `NONE`.
+- `kiara-server/src/services/memory/retrieval/sourceRouter.js::routeMemorySources()` defines the current intent/source rules.
+- `kiara-server/src/services/live/systemPromptBuilder.js` logs the assembled prompt's memory count/status and authenticated identity status.
+
+## Token refresh interpretation
+
+The existing `LIVE_TOKEN_REFRESH` diagnostics for Live trace `KIARA-mvdwpo4d-4oa7om` reported `promptContextSource:"session_prompt_cache"`, `reason:"token_refresh_reuses_session_instruction"`, `instructionTarget:"future_live_connection"`, and `activeSessionInstructionUpdated:false`. They also reported `memoryStatus:"NO_MEMORY"` / `memoryCount:0` and `instructionHasMemoryContext:false`, while authenticated identity was present.
+
+For this run, `instructionHasMemoryContext=false` is consistent with the cached instruction containing no retrieved memory; it does not by itself show that refresh dropped previously assembled memory. Token refresh reused the existing prompt and did not update the active websocket instruction. Since that prompt already had zero memory context, these logs cannot establish preservation of a memory-bearing prompt. No successful recall/reconnect was observed after refresh, and the actual scheduled-refresh timer was not validated in this isolated-account run.
+
+## Run status and metrics
+
+- Canonical storage: **1/1**.
+- Retrieval of the saved fact: **0/1**.
+- Context inclusion: **0/1**.
+- Transcript literal correctness: **1/1**, but not a verifiable memory-backed answer.
+- Memory-backed recall accuracy: **not reportable**; there were **0 verifiable answers** because the fact never reached retrieval/context.
+- Five-fact baseline and larger stress test: **STOPPED after the first fact**, as required by the stop-on-first-failure condition.
+- Refresh/reconnect matrix and scheduled timer test: **NOT RUN / BLOCKED** by the first-fact retrieval failure.
+
+The evidence identifies a reproducible runtime routing failure, not a measured memory-capacity limit. The earlier 503 / `ERR_ABORTED` cause remains unresolved and was not reproduced by this one-fact run. The first safe next step is to capture the exact natural-language query with a privacy-safe correlation mechanism and verify the intended route in an isolated test account; no further synthetic facts should be added until that path is verified. The restored version-16 record remains outside the test dataset and must remain untouched.
+
+## Canonical retrieval timing and bounded source waits
+
+`memoryRetrievalAdapter.js` applies a bounded wait to each STM/canonical source. The
+timeout bounds how long the adapter waits; it does **not** cancel the underlying
+Redis, MongoDB, embedding, or semantic-index operation. A source that settles after
+the deadline is recorded by `MEMORY_SOURCE_LATE_SETTLEMENT`, and stage-level timing
+events continue to identify Redis cache lookup, Mongo repository reads, Mongo
+authoritative validation, embedding, semantic-index query, and ranking separately.
+
+Canonical candidate validation uses a single user-scoped Mongo query for a batch
+of canonical IDs when the repository provides `getManyByIds()`, rather than one
+Mongo lookup per candidate. Mongo remains authoritative; returned records are
+still checked against the requested user, lifecycle status, and temporal validity.
+The existing `(userId, id)` index supports this lookup.
+
+The earlier approximately 153-second observation is not attributed to any
+dependency without its correlated stage timings. A bounded request must be
+evaluated using the stage events above; the adapter timeout alone is not evidence
+that the underlying operation stopped.

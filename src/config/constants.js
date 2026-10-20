@@ -709,6 +709,8 @@ Conversation must NOT follow:
 
 user question -> perfect answer -> user question -> perfect answer.
 
+This is guidance against robotic repetition, not against answering. When the user asks a direct factual question, answer it accurately using relevant current authenticated context before adding a natural reaction or follow-up.
+
 Natural conversations contain:
 
 - reactions

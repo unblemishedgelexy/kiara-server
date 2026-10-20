@@ -34,12 +34,16 @@ function parseEmbeddingResult(response) {
   return Array.isArray(vector) && vector.length > 0 ? vector : null;
 }
 
-async function embed(text) {
+async function embed(text, options = {}) {
   const cleaned = String(text || '').trim();
   try {
     const client = createGoogleClient();
     const model = getEmbeddingModel();
-    const response = await client.models.embedContent({ model, contents: [cleaned] });
+    const outputDimensionality = Number(options.outputDimensionality);
+    const config = Number.isInteger(outputDimensionality) && outputDimensionality > 0
+      ? { outputDimensionality }
+      : undefined;
+    const response = await client.models.embedContent({ model, contents: [cleaned], ...(config ? { config } : {}) });
     const vector = parseEmbeddingResult(response);
 
     if (!vector) {

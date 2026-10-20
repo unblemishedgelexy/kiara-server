@@ -9,46 +9,8 @@
  * Called by geminiService.createLiveEphemeralToken() on session start.
  */
 
+const crypto = require('node:crypto');
 const MemoryService = require('../memory');
-const User = require('../../models/User');
-const { isMemoryEligible } = require('../memory/memoryStabilityGate');
-
-function normalizeUserFullName(user = null) {
-  if (!user || typeof user !== 'object') {
-    return '';
-  }
-
-  const directFullName = String(user.fullName || '').trim();
-  if (directFullName) {
-    return directFullName;
-  }
-
-  const firstName = String(user.firstName || '').trim();
-  const lastName = String(user.lastName || '').trim();
-  const displayName = String(user.displayName || '').trim();
-
-  const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
-  return fullName || displayName;
-}
-
-async function getAuthenticatedUserContext(userId) {
-  if (!userId) {
-    return '';
-  }
-
-  try {
-    const user = await User.findById(userId).select('firstName lastName displayName fullName');
-    const fullName = normalizeUserFullName(user);
-
-    if (!fullName) {
-      return '';
-    }
-
-    return '';
-  } catch {
-    return '';
-  }
-}
 
 module.exports = {
 
@@ -67,6 +29,8 @@ module.exports = {
     const userQuery = options.userQuery || '';
     const sessionId = options.sessionId || userId || 'session';
     const activeContext = options.activeContext || {};
+    const traceId = String(options.traceId || 'untraced');
+    const startedAt = Date.now();
 
     // Guard: only build when explicitly triggered
     if (!trigger) {
@@ -77,18 +41,21 @@ module.exports = {
       return { systemPrompt: '' };
     }
 
-    if (!isMemoryEligible(userId, sessionId)) {
-      return { systemPrompt: '' };
-    }
-
     try {
+      const retrievalStartedAt = Date.now();
       const result = await MemoryService.prepareContext(userId, {
         charLimit,
         userQuery,
         sessionId,
         activeContext,
+        traceId,
       });
-      const authenticatedUserContext = await getAuthenticatedUserContext(userId);
+      const retrievalElapsedMs = Date.now() - retrievalStartedAt;
+      if (result?.ok === false && !result.systemPrompt) {
+        const error = new Error('Memory retrieval failed while building the Live prompt.');
+        error.code = result.errorCode || 'MEMORY_RETRIEVAL_FAILURE';
+        throw error;
+      }
       const RESPONSE_GUIDELINES = `
 Response Guidelines (for Kiara's replies):
 - Speak like a natural human friend; never reply like an assistant.
@@ -119,19 +86,58 @@ Response Guidelines (for Kiara's replies):
 
       const promptParts = [String(result.systemPrompt || '').trim(), RESPONSE_GUIDELINES].filter(Boolean);
       const augmented = promptParts.join('\n\n');
-      const resolvedUser = await User.findById(userId).select('firstName lastName displayName');
-      const resolvedFullName = normalizeUserFullName(resolvedUser);
-
+      const memoryContextIncluded = Array.isArray(result.facts)
+        && result.facts.length > 0
+        && Boolean(String(result.systemPrompt || '').trim());
+      const memoryContextHash = result.systemPrompt
+        ? crypto.createHash('sha256').update(String(result.systemPrompt)).digest('hex').slice(0, 16)
+        : null;
+      const retrievalMetadata = result.retrievalMetadata || {};
+      console.info('[LIVE_PROMPT_STAGE]', JSON.stringify({
+        traceId,
+        stage: 'system_prompt_assembled',
+        status: result.ok === false ? 'partial' : 'success',
+        elapsedMs: Date.now() - startedAt,
+        retrievalElapsedMs,
+        identityLookupMs: Number(result.identityLookupMs) || 0,
+        identityStatus: result.identityStatus || 'UNKNOWN',
+        errorCode: result.ok === false ? (result.errorCode || 'MEMORY_RETRIEVAL_FAILURE') : null,
+        queryLength: String(userQuery).length,
+        memoryStatus: result.memoryStatus || (result.facts?.length ? 'MEMORY_FOUND' : 'NO_MEMORY'),
+        memoryCount: Array.isArray(result.facts) ? result.facts.length : 0,
+        memoryContextIncluded,
+        memoryContextHash,
+        retrievalStatus: retrievalMetadata.status || result.memoryStatus || null,
+        routing: retrievalMetadata.routing || null,
+        plannerStatus: retrievalMetadata.plannerStatus || 'NOT_REPORTED',
+        plannerSources: Array.isArray(retrievalMetadata.plannedSources) ? retrievalMetadata.plannedSources : [],
+        sourcesAttempted: Array.isArray(retrievalMetadata.sourcesAttempted) ? retrievalMetadata.sourcesAttempted : [],
+        fallbackPasses: Number(retrievalMetadata.fallbackPasses) || 0,
+        promptLength: augmented.length,
+        retrievalLatency: result.retrievalMetadata?.latency || null,
+      }));
       return {
         systemPrompt: augmented,
         memoryRevision: result.memoryRevision || 0,
         contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
-        userFullName: resolvedFullName || null,
-        userFullNamePresent: Boolean(resolvedFullName),
+        memoryStatus: result.memoryStatus || (result.facts?.length ? 'MEMORY_FOUND' : 'NO_MEMORY'),
+        memoryCount: Array.isArray(result.facts) ? result.facts.length : 0,
+        memoryContextIncluded,
+        memoryContextHash,
+        identityStatus: result.identityStatus || 'UNKNOWN',
+        errorCode: result.ok === false ? (result.errorCode || 'MEMORY_RETRIEVAL_FAILURE') : null,
       };
 
-    } catch {
-      return { systemPrompt: '' };
+    } catch (error) {
+      console.warn('[LIVE_PROMPT_STAGE]', JSON.stringify({
+        traceId,
+        stage: 'system_prompt_assembled',
+        status: 'failure',
+        elapsedMs: Date.now() - startedAt,
+        queryLength: String(userQuery).length,
+        errorCode: error?.code || error?.name || 'PROMPT_BUILD_FAILURE',
+      }));
+      throw error;
     }
   },
 };

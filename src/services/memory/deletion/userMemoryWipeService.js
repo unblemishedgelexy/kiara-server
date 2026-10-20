@@ -22,6 +22,9 @@ const pineconeService = require('../../pineconeService');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 const ConversationTurn = require('../../../models/ConversationTurn');
 const PersonProfile = require('../../../models/PersonProfile');
+const MemoryModel = require('../../../models/Memory');
+const { RedisMemoryCache } = require('../cache/redisMemoryCache');
+const { semanticIndex } = require('../semantic/semanticIndex');
 const { InvalidUserError } = require('../../../utils/workingMemory/errors');
 
 // Wipe lock TTL: 5 minutes (safety timeout)
@@ -363,6 +366,61 @@ async function deleteMongoPersonProfile(userId) {
   }
 }
 
+async function deleteCanonicalMemories(userId) {
+  let memoryIds;
+  try {
+    const memories = await MemoryModel.find({ userId }).select('id').lean();
+    memoryIds = memories.map((memory) => String(memory.id || '')).filter(Boolean);
+    const deleted = await MemoryModel.deleteMany({ userId });
+    const mongo = { deleted: true, count: Number(deleted.deletedCount) || 0 };
+
+    let cacheResult;
+    try {
+      const cache = new RedisMemoryCache();
+      const count = await cache.invalidateUser(userId);
+      cacheResult = { deleted: true, count };
+    } catch {
+      cacheResult = { deleted: false, error: 'Canonical memory cache cleanup failed.' };
+    }
+
+    let semanticIndexResult;
+    try {
+      semanticIndexResult = typeof semanticIndex.deleteUserNamespace === 'function'
+        ? await semanticIndex.deleteUserNamespace(userId)
+        : { deleted: false };
+    } catch (error) {
+      const cause = error?.cause?.cause || error?.cause || error;
+      const code = cause?.status || cause?.code || error?.code || error?.name || 'UNKNOWN';
+      semanticIndexResult = {
+        deleted: false,
+        errorCode: /^[A-Za-z0-9_.-]{1,64}$/.test(String(code)) ? String(code) : 'UNKNOWN',
+      };
+    }
+
+    return {
+      mongo,
+      cache: cacheResult,
+      semanticIndex: {
+        deleted: semanticIndexResult?.deleted === true,
+        count: Number.isFinite(semanticIndexResult?.count) ? semanticIndexResult.count : null,
+        ...(semanticIndexResult?.mode ? { mode: semanticIndexResult.mode } : {}),
+        ...(semanticIndexResult?.deleted !== true
+          ? {
+            error: 'Canonical semantic index cleanup failed.',
+            errorCode: semanticIndexResult?.errorCode || 'UNKNOWN',
+          }
+          : {}),
+      },
+    };
+  } catch {
+    return {
+      mongo: { deleted: false, count: 0, error: 'Canonical memory database cleanup failed.' },
+      cache: { deleted: false, error: 'Not attempted because Mongo cleanup failed.' },
+      semanticIndex: { deleted: false, count: 0, error: 'Not attempted because Mongo cleanup failed.' },
+    };
+  }
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Main Wipe Orchestration
 // ────────────────────────────────────────────────────────────────────
@@ -401,6 +459,9 @@ async function wipeUserMemory(userId, options = {}) {
     redisEpisodeLinks: null,
     redisStats: null,
     pinecone: null,
+    canonicalMemoryMongo: null,
+    canonicalMemoryCache: null,
+    canonicalMemorySemanticIndex: null,
     mongoConversation: null,
     mongoPersonProfile: null,
   };
@@ -440,7 +501,13 @@ async function wipeUserMemory(userId, options = {}) {
     // Tier 4: Delete Pinecone vectors
     results.pinecone = await deletePineconeVectors(normalizedUserId);
 
-    // Tier 5: Delete Mongo archive and identity data
+    // Tier 5: Delete canonical memory and its derived cache/index records.
+    const canonical = await deleteCanonicalMemories(normalizedUserId);
+    results.canonicalMemoryMongo = canonical.mongo;
+    results.canonicalMemoryCache = canonical.cache;
+    results.canonicalMemorySemanticIndex = canonical.semanticIndex;
+
+    // Tier 6: Delete Mongo archive and identity data
     results.mongoConversation = await deleteMongoConversationTurn(normalizedUserId);
     results.mongoPersonProfile = await deleteMongoPersonProfile(normalizedUserId);
   } finally {
@@ -459,6 +526,9 @@ async function wipeUserMemory(userId, options = {}) {
     && results.redisStats && results.redisStats.deleted !== false;
 
   const externalSuccess = results.pinecone && results.pinecone.deleted !== false
+    && results.canonicalMemoryMongo && results.canonicalMemoryMongo.deleted !== false
+    && results.canonicalMemoryCache && results.canonicalMemoryCache.deleted !== false
+    && results.canonicalMemorySemanticIndex && results.canonicalMemorySemanticIndex.deleted !== false
     && results.mongoConversation && results.mongoConversation.deleted !== false
     && results.mongoPersonProfile && results.mongoPersonProfile.deleted !== false;
 

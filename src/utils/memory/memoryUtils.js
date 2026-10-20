@@ -12,9 +12,16 @@ function hashId(seed) {
   return crypto.createHash('sha256').update(String(seed || '')).digest('hex').slice(0, 12);
 }
 
-async function computeEmbedding(text) {
+async function computeEmbedding(text, options = {}) {
   const cleaned = normalizeText(text);
-  return await embeddingProvider.embed(cleaned);
+  return await embeddingProvider.embed(cleaned, options);
+}
+
+function getPineconeEmbeddingOptions() {
+  const outputDimensionality = Number(env.pineconeVectorDimension);
+  return Number.isInteger(outputDimensionality) && outputDimensionality > 0
+    ? { outputDimensionality }
+    : {};
 }
 
 async function validateEmbeddingConfiguration() {
@@ -34,6 +41,7 @@ async function validateEmbeddingConfiguration() {
 module.exports = {
   normalizeText,
   computeEmbedding,
+  getPineconeEmbeddingOptions,
   hashId,
   validateEmbeddingConfiguration,
 };
