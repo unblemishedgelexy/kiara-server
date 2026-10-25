@@ -11,6 +11,7 @@ const liveRoutes = require('./routes/liveRoutes');
 const ttsRoutes = require('./routes/ttsRoutes');
 const identityRoutes = require('./routes/identityRoutes');
 const workingMemoryRoutes = require('./routes/workingMemory.routes');
+const adminRoutes = require('./routes/adminRoutes');
 const security = require('./middleware/security');
 const errorHandler = require('./middleware/errorHandler');
 const { env, isAllowedCorsOrigin } = require('./config/env');
@@ -135,6 +136,7 @@ const createApp = () => {
   app.use('/api/identity', identityRoutes);
   app.use('/api/tts', ttsRoutes);
   app.use('/api/working-memory', workingMemoryRoutes);
+  app.use('/api', adminRoutes);
 
   if (env.nodeEnv !== 'production') {
     app.use('/api/dev', require('./routes/devPerfRoutes'));

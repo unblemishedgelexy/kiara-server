@@ -4,6 +4,7 @@ const { generateAccessToken, generateRefreshToken } = require('../services/../se
 const UserModel = require('../models/User');
 const bcrypt = require('bcryptjs');
 const googleOAuthService = require('../services/../services/auth/googleOAuthService');
+const { hasAdminPanelAccess } = require('../middleware/requireAdmin');
 
 
 function buildAuthPayload(user, accessToken, refreshToken) {
@@ -185,29 +186,33 @@ async function getGoogleAuthUrl(req, res, next) {
     }
 
     const result = await googleOAuthService.createAuthRequest(redirectUri);
-    res.json({ success: true, authUrl: result.authUrl });
+    res.json({ success: true, authUrl: result.authUrl, data: { authUrl: result.authUrl } });
   } catch (error) {
     return res.status(400).json({ success: false, message: error.message || 'Unable to create Google auth URL.' });
   }
 }
 
 async function handleGoogleCallback(req, res, next) {
+  let returnUrl;
   try {
     const { code, state, error } = req.query;
-    if (error) {
-      return res.status(400).json({ success: false, message: 'Google authentication was cancelled or denied.' });
-    }
-
-    if (!code || !state) {
-      console.error('[authController] ❌ Missing code or state');
-      return res.status(400).json({ success: false, message: 'Missing code or state in callback response.' });
-    }
-
+    if (!state) return res.status(400).json({ success: false, message: 'Missing OAuth state.' });
     const authState = await googleOAuthService.consumeAuthState(String(state));
     if (!authState) {
-      console.error('[authController] ❌ Auth state invalid or expired');
       return res.status(400).json({ success: false, message: 'Invalid or expired OAuth state.' });
     }
+    returnUrl = new URL(authState.returnUrl);
+    if (error) {
+      returnUrl.searchParams.set('status', 'denied');
+      returnUrl.searchParams.set('message', 'Google sign-in was cancelled.');
+      return res.redirect(303, returnUrl.toString());
+    }
+    if (!code) {
+      returnUrl.searchParams.set('status', 'error');
+      returnUrl.searchParams.set('message', 'Google did not return an authorization code.');
+      return res.redirect(303, returnUrl.toString());
+    }
+
     const tokenPayload = await googleOAuthService.exchangeCodeForTokens(String(code), authState.codeVerifier);
     const idTokenPayload = await googleOAuthService.verifyIdToken(tokenPayload.id_token);
 
@@ -220,6 +225,19 @@ async function handleGoogleCallback(req, res, next) {
       googleEmail: idTokenPayload.email,
     };
 
+    const normalizedEmail = googleUser.email.toLowerCase();
+    const [emailAccount, linkedGoogleAccount] = await Promise.all([
+      UserModel.findOne({ email: normalizedEmail }).select('googleId role isActive').lean(),
+      UserModel.findOne({ googleId: googleUser.googleId }).select('email').lean(),
+    ]);
+    const googleIdMismatch = emailAccount?.googleId && emailAccount.googleId !== googleUser.googleId;
+    const emailMismatch = linkedGoogleAccount && linkedGoogleAccount.email.toLowerCase() !== normalizedEmail;
+    if (!hasAdminPanelAccess(emailAccount) || googleIdMismatch || emailMismatch) {
+      returnUrl.searchParams.set('status', 'denied');
+      returnUrl.searchParams.set('message', 'This Google account is not assigned an active admin or developer role.');
+      return res.redirect(303, returnUrl.toString());
+    }
+
     const result = await authService.loginWithGoogle(googleUser);
     
     const authTicket = await googleOAuthService.createAuthTicket(
@@ -227,13 +245,17 @@ async function handleGoogleCallback(req, res, next) {
       result.accessToken,
       result.refreshToken
     );
-    const redirectUrl = new URL(authState.returnUrl);
-    redirectUrl.searchParams.set('auth_ticket', authTicket);
-    redirectUrl.searchParams.set('status', 'success');
+    returnUrl.searchParams.set('auth_ticket', authTicket);
+    returnUrl.searchParams.set('status', 'success');
 
-    return res.redirect(303, redirectUrl.toString());
+    return res.redirect(303, returnUrl.toString());
   } catch (error) {
     console.error('[authController] Google callback failed:', error?.name || 'OAuthCallbackError', error?.code || 'UNKNOWN');
+    if (returnUrl) {
+      returnUrl.searchParams.set('status', 'error');
+      returnUrl.searchParams.set('message', 'Google sign-in could not be completed. Please try again.');
+      return res.redirect(303, returnUrl.toString());
+    }
     return res.status(500).json({ success: false, message: 'Google authentication failed.' });
   }
 }
@@ -278,6 +300,11 @@ async function exchangeAuthTicket(req, res, next) {
       user: authService.sanitizeUser(user),
       accessToken: ticket.accessToken,
       refreshToken: ticket.refreshToken,
+      data: {
+        user: authService.sanitizeUser(user),
+        accessToken: ticket.accessToken,
+        refreshToken: ticket.refreshToken,
+      },
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message || 'Failed to exchange auth ticket.' });

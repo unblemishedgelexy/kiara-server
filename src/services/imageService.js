@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { createReadStream } = require('node:fs');
 const ImageKit = require('@imagekit/nodejs');
 const { env } = require('../config/env');
 
@@ -27,9 +28,19 @@ async function uploadFileToImageKit(filePath, fileName) {
   return res;
 }
 
+async function uploadFileStreamToImageKit(filePath, fileName, folder) {
+  const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
+  return imagekit.files.upload({
+    file: createReadStream(absolute),
+    fileName,
+    folder,
+    useUniqueFileName: true,
+  });
+}
+
 async function deleteFileFromImageKit(fileId) {
   if (!fileId) return;
   await imagekit.files.delete(fileId);
 }
 
-module.exports = { uploadFileToImageKit, deleteFileFromImageKit };
+module.exports = { uploadFileToImageKit, uploadFileStreamToImageKit, deleteFileFromImageKit };

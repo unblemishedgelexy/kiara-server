@@ -28,7 +28,7 @@ const userSchema = new mongoose.Schema(
     profilePictureFileId: { type: String },
     
     // Role and status
-    role: { type: String, enum: ['user', 'admin'], default: 'user' },
+    role: { type: String, enum: ['user', 'dev', 'admin'], default: 'user' },
     mode: { type: String, enum: ['registered', 'guest'], default: 'registered' },
     isActive: { type: Boolean, default: true },
 

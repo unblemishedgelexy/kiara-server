@@ -64,7 +64,13 @@ const isNodeTest = process.env.NODE_TEST_CONTEXT === 'child-v8' || nodeEnv === '
 const env = {
   allowedOrigins: mergeLists(
     readList('ALLOWED_ORIGINS', []),
-    readList('CLIENT_ORIGIN', defaultClientOrigins)
+    readList('CLIENT_ORIGIN', defaultClientOrigins),
+    nodeEnv === 'production' ? [] : [
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:5174',
+    ]
   ),
   elevenLabsApiKey: readEnv('ELEVENLABS_API_KEY'),
   elevenLabsVoiceId: readEnv('ELEVENLABS_VOICE_ID'),
@@ -100,6 +106,7 @@ const env = {
     [
       readEnv('APP_DEEP_LINK_URI', 'com.kiara.ai://auth-complete'),
       readEnv('WEB_AUTH_RETURN_URL', 'http://localhost:5173/auth/callback'),
+      ...(nodeEnv !== 'production' ? ['http://localhost:5174'] : []),
     ]
   ),
   aesSecret: readEnv('AES_SECRET', 'aes-secret-32-bytes-length!!'),
@@ -162,6 +169,7 @@ const env = {
   imagekitPrivateKey: readEnv('IMAGEKIT_PRIVATE_KEY', ''),
   imagekitUrlEndpoint: readEnv('IMAGEKIT_URL_ENDPOINT', ''),
   imagekitFolder: readEnv('IMAGEKIT_FOLDER', '/profiles'),
+  imagekitMaxApkSizeBytes: readPositiveNumber('IMAGEKIT_MAX_APK_SIZE_BYTES', 100 * 1024 * 1024),
   razorpayKeyId: readEnv('RAZORPAY_KEY_ID', ''),
   razorpayKeySecret: readEnv('RAZORPAY_KEY_SECRET', ''),
   razorpayWebhookSecret: readEnv('RAZORPAY_WEBHOOK_SECRET', ''),
