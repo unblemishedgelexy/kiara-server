@@ -77,11 +77,15 @@ function parseAttachmentUpload(req, res, next) {
     }
 
     const tooLarge = error.code === 'LIMIT_FILE_SIZE' || error.code === 'LIMIT_TOTAL_FILE_SIZE';
+    const tooManyFiles = error.code === 'LIMIT_FILE_COUNT';
     res.status(tooLarge ? 413 : 400).json({
       success: false,
+      code: tooLarge ? 'ATTACHMENT_TOO_LARGE' : tooManyFiles ? 'TOO_MANY_ATTACHMENTS' : 'ATTACHMENT_UPLOAD_FAILED',
       message: tooLarge
         ? 'Each attachment and the combined upload must be smaller than 100 MB.'
-        : 'Unable to receive these attachments.',
+        : tooManyFiles
+          ? `Choose up to ${MAX_ATTACHMENT_COUNT} files at a time.`
+          : 'Unable to receive these attachments. Please retry.',
     });
   });
 }
@@ -722,10 +726,15 @@ router.post('/analyze-attachments', authMiddleware, protectExpensive, parseAttac
     console.error('[LIVE_ATTACHMENT_ANALYSIS]', {
       requestId: req.requestId || null,
       error: error?.name || error?.code || 'ProviderError',
+      providerStatus: Number.isInteger(error?.status) ? error.status : null,
     });
-    return res.status(502).json({
+    const providerUnavailable = error?.status === 429 || error?.status >= 500;
+    return res.status(providerUnavailable ? 503 : 502).json({
       success: false,
-      message: 'Kiara could not review these files. Check the file format and try again.',
+      code: providerUnavailable ? 'DOCUMENT_REVIEW_TEMPORARILY_UNAVAILABLE' : 'DOCUMENT_REVIEW_FAILED',
+      message: providerUnavailable
+        ? 'Document review is temporarily busy. Keep the files attached and try again shortly.'
+        : 'Kiara could not read one of these files. Try a PDF, image, or smaller supported document.',
     });
   } finally {
     await Promise.allSettled([
