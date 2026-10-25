@@ -16,7 +16,7 @@ async function getProfile(req, res, next) {
   try {
     // include email verification flag so frontend can show verification UI
     const user = await UserModel.findById(req.userId).select(
-      'firstName lastName email mobileNumber profilePicture emailVerified termsVersion termsAcceptedAt privacyVersion privacyAcceptedAt passwordLoginEnabled googleId',
+      'firstName lastName email mobileNumber profilePicture emailVerified role termsVersion termsAcceptedAt privacyVersion privacyAcceptedAt passwordLoginEnabled googleId',
     );
     if (!user) return res.status(404).json({ success: false, message: 'Profile not found' });
     res.json({ success: true, data: serializeProfile(user) });
@@ -30,7 +30,7 @@ async function updateProfile(req, res, next) {
     if (firstName) updates.firstName = firstName.trim();
     if (lastName) updates.lastName = lastName.trim();
     const user = await UserModel.findByIdAndUpdate(req.userId, updates, { returnDocument: 'after' }).select(
-      'firstName lastName email mobileNumber profilePicture emailVerified termsVersion termsAcceptedAt privacyVersion privacyAcceptedAt passwordLoginEnabled googleId',
+      'firstName lastName email mobileNumber profilePicture emailVerified role termsVersion termsAcceptedAt privacyVersion privacyAcceptedAt passwordLoginEnabled googleId',
     );
     res.json({ success: true, data: user ? serializeProfile(user) : null });
   } catch (err) { next(err); }

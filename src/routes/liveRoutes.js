@@ -474,7 +474,11 @@ router.post('/tts', authMiddleware, protectExpensive, async (req, res) => {
  */
 router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
   const userId = req.userId || null;
-  if (userId && env.nodeEnv === 'production') {
+  if (
+    userId
+    && env.nodeEnv === 'production'
+    && !(await subscriptionUsageService.isAdminUser(userId))
+  ) {
     try {
       const feedbackStatus = await getSessionFeedbackBlockStatus(userId);
       if (feedbackStatus.blockedUntil) {
