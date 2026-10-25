@@ -2,11 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { GoogleGenAI } = require('@google/genai');
 const { env } = require('../../config/env');
-const {
-  GEMINI_TEXT_MODEL,
-  GEMINI_LIVE_SYSTEM_INSTRUCTION,
-  buildGeminiLiveSystemInstruction,
-} = require('../../config/constants');
+const { GEMINI_TEXT_MODEL } = require('../../config/constants');
+const { LIVE_SYSTEM_INSTRUCTION } = require('./liveSystemInstruction');
 const {
   createLiveConnectConfig,
   createPublicLiveSessionConfig,
@@ -401,7 +398,7 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   // Build dynamic system instruction including user memories only after the
   // live session has met the stability gate. Until then, the live path stays
   // intentionally minimal: user microphone -> Gemini Live -> response -> audio.
-  let dynamicSystemInstruction = GEMINI_LIVE_SYSTEM_INSTRUCTION;
+  let dynamicSystemInstruction = LIVE_SYSTEM_INSTRUCTION;
   let promptBuilderApplied = false;
   let memoryRevision = 0;
   let contextMemoryRevision = 0;
@@ -473,7 +470,7 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
           throw error;
         }
 
-        dynamicSystemInstruction = `${GEMINI_LIVE_SYSTEM_INSTRUCTION}\n\n${built.systemPrompt}`;
+        dynamicSystemInstruction = `${LIVE_SYSTEM_INSTRUCTION}\n\n${built.systemPrompt}`;
         promptBuilderApplied = true;
         memoryRevision = Number(built.memoryRevision) || 0;
         contextMemoryRevision = Number(built.contextMemoryRevision) || memoryRevision;

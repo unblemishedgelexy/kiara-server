@@ -2,7 +2,11 @@
 
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { validateSupportRequest } = require('./supportController');
+const {
+  getSessionFeedbackBlockStatus,
+  isSessionFeedbackSubject,
+  validateSupportRequest,
+} = require('./supportController');
 
 test('trims and accepts a valid support request', () => {
   assert.deepEqual(
@@ -25,6 +29,43 @@ test('accepts and preserves an optional session rating', () => {
       rating: 2,
     },
   );
+});
+
+test('recognizes current and legacy session feedback subjects case-insensitively', () => {
+  assert.equal(isSessionFeedbackSubject('Kiara session issue report'), true);
+  assert.equal(isSessionFeedbackSubject('KIARA SESSION FEEDBACK'), true);
+  assert.equal(isSessionFeedbackSubject('Billing'), false);
+});
+
+test('calculates the 24-hour block deadline from the latest feedback record', async () => {
+  const originalFindOne = require('../models/SupportRequest').findOne;
+  const feedbackCreatedAt = new Date('2025-04-01T12:00:00.000Z');
+  require('../models/SupportRequest').findOne = () => ({
+    sort: () => ({
+      select: () => ({
+        lean: async () => ({ createdAt: feedbackCreatedAt }),
+      }),
+    }),
+  });
+
+  try {
+    assert.deepEqual(
+      await getSessionFeedbackBlockStatus(
+        'user-id',
+        new Date('2025-04-02T11:00:00.000Z').getTime(),
+      ),
+      { submitted: true, blockedUntil: '2025-04-02T12:00:00.000Z' },
+    );
+    assert.deepEqual(
+      await getSessionFeedbackBlockStatus(
+        'user-id',
+        new Date('2025-04-02T13:00:00.000Z').getTime(),
+      ),
+      { submitted: true, blockedUntil: null },
+    );
+  } finally {
+    require('../models/SupportRequest').findOne = originalFindOne;
+  }
 });
 
 test('rejects support requests outside the subject and message limits', () => {

@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { GEMINI_LIVE_SYSTEM_INSTRUCTION } = require('../../config/constants');
+const { LIVE_SYSTEM_INSTRUCTION } = require('./liveSystemInstruction');
 const {
   createLiveConnectConfig,
   createLiveSessionConfig,
@@ -21,20 +21,22 @@ test('configures stable Live generation with the provided session instruction', 
   assert.deepEqual(connectConfig.responseModalities, ['AUDIO']);
 });
 
-test('keeps conversational style guidance from overriding direct factual answers', () => {
+test('prioritizes accurate factual answers using authenticated context', () => {
   assert.match(
-    GEMINI_LIVE_SYSTEM_INSTRUCTION,
-    /When the user asks a direct factual question, answer it accurately using relevant current authenticated context/i,
+    LIVE_SYSTEM_INSTRUCTION,
+    /For factual questions, prioritize accuracy and relevant authenticated context/i,
   );
 });
 
 test('instructs Kiara to emit a talk gesture for ordinary spoken replies', () => {
   assert.match(
-    GEMINI_LIVE_SYSTEM_INSTRUCTION,
-    /"gesture" field controls the avatar's body animation/i,
+    LIVE_SYSTEM_INSTRUCTION,
+    /"gesture":"talk"/i,
   );
-  assert.match(
-    GEMINI_LIVE_SYSTEM_INSTRUCTION,
-    /Use "talk" for ordinary spoken replies/i,
-  );
+});
+
+test('keeps Live instructions concise and prevents repeated spoken answers', () => {
+  assert.ok(LIVE_SYSTEM_INSTRUCTION.length < 4000);
+  assert.match(LIVE_SYSTEM_INSTRUCTION, /Do not restate the question, repeat a point you already made/i);
+  assert.match(LIVE_SYSTEM_INSTRUCTION, /Do not repeat the JSON or spoken reply within the same turn/i);
 });

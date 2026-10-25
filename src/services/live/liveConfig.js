@@ -1,9 +1,6 @@
 const path = require('path');
-const {
-  GEMINI_LIVE_MODEL,
-  GEMINI_LIVE_SYSTEM_INSTRUCTION,
-  GEMINI_LIVE_VOICE,
-} = require('../../config/constants');
+const { GEMINI_LIVE_MODEL, GEMINI_LIVE_VOICE } = require('../../config/constants');
+const { LIVE_SYSTEM_INSTRUCTION } = require('./liveSystemInstruction');
 
 let capabilityRegistry = null;
 try {
@@ -82,7 +79,7 @@ function createLiveSessionConfig(options = {}) {
   return {
     model,
     responseModalities: ['AUDIO'],
-    systemInstruction: options.systemInstruction || GEMINI_LIVE_SYSTEM_INSTRUCTION,
+    systemInstruction: options.systemInstruction || LIVE_SYSTEM_INSTRUCTION,
     voiceName,
   };
 }

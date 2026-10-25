@@ -4,7 +4,10 @@ const authMiddleware = require('../middleware/authMiddleware');
 const redisAbuseProtection = require('../middleware/redisAbuseProtection');
 const { getProfile, updateProfile, uploadProfilePicture } = require('../controllers/profileController');
 const { requestEmailVerificationOTP, verifyEmailOTPFromProfile } = require('../controllers/authControllerV2');
-const { createSupportRequest } = require('../controllers/supportController');
+const {
+  createSupportRequest,
+  getSessionFeedbackStatus,
+} = require('../controllers/supportController');
 const accountDeletionController = require('../controllers/accountDeletionController');
 const authValidation = require('../middleware/authValidation');
 const { upload } = require('../services/../services/infrastructure/uploadService');
@@ -35,6 +38,7 @@ router.post('/memory-deletion', sensitiveActionSchema, accountDeletionController
 
 router.post('/verify-email/send-otp', authValidation.validateRequestEmailVerificationOTP, requestEmailVerificationOTP);
 router.post('/verify-email/confirm', authValidation.validateVerifyEmailOTPRequest, verifyEmailOTPFromProfile);
+router.get('/support-requests/session-feedback/status', getSessionFeedbackStatus);
 router.post('/support-requests', createSupportRequest);
 
 module.exports = router;

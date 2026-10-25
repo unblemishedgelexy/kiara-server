@@ -21,6 +21,7 @@ const { env } = require('../config/env');
 const authMiddleware = require('../middleware/authMiddleware');
 const redisAbuseProtection = require('../middleware/redisAbuseProtection');
 const subscriptionUsageService = require('../services/subscriptions/usageService');
+const { getSessionFeedbackBlockStatus } = require('../controllers/supportController');
 
 const router = express.Router();
 const protectExpensive = redisAbuseProtection({ scope: 'account-ip', bucket: 'expensive' });
@@ -472,6 +473,28 @@ router.post('/tts', authMiddleware, protectExpensive, async (req, res) => {
  * ElevenLabs TTS is intentionally NOT mixed into this route.
  */
 router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
+  const userId = req.userId || null;
+  if (userId && env.nodeEnv === 'production') {
+    try {
+      const feedbackStatus = await getSessionFeedbackBlockStatus(userId);
+      if (feedbackStatus.blockedUntil) {
+        return res.status(423).json({
+          success: false,
+          code: 'SESSION_FEEDBACK_COOLDOWN',
+          error: 'Kiara is paused for 24 hours after session feedback. You remain signed in.',
+          blockedUntil: feedbackStatus.blockedUntil,
+        });
+      }
+    } catch (error) {
+      console.error('[LIVE_FEEDBACK_COOLDOWN_CHECK_FAILED]', error?.name || 'DatabaseError');
+      return res.status(503).json({
+        success: false,
+        code: 'LIVE_COOLDOWN_STATUS_UNAVAILABLE',
+        error: 'Unable to verify whether Kiara is available right now.',
+      });
+    }
+  }
+
   const traceId =
     req.headers['x-kiara-trace-id'] ||
     req.headers['X-Kiara-Trace-Id'] ||
@@ -495,7 +518,6 @@ router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
     return;
   }
 
-  const userId = req.userId || null;
   const requestBody = req.body || {};
 
   const userQuery =
