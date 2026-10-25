@@ -10,6 +10,7 @@ const supportRequestSchema = new mongoose.Schema(
     },
     subject: { type: String, required: true, trim: true, maxlength: 120 },
     message: { type: String, required: true, trim: true, maxlength: 3000 },
+    rating: { type: Number, min: 1, max: 5 },
     status: { type: String, enum: ['open', 'in_progress', 'resolved'], default: 'open' },
   },
   { timestamps: true },
