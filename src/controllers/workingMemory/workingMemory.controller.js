@@ -185,6 +185,7 @@ const WorkingMemoryController = {
     try {
       const userId = req.userId;
       const { reason } = req.body || {};
+      const { securityCode } = req.body || {};
 
       const wipeReason = reason || 'user_request';
       if (wipeReason !== 'user_request' && wipeReason !== 'admin_command') {
@@ -203,13 +204,31 @@ const WorkingMemoryController = {
         });
       }
 
-      // Import wipe service
-      const { wipeUserMemory } = require('../../services/memory/deletion/userMemoryWipeService');
+      if (wipeReason === 'user_request') {
+        if (typeof securityCode !== 'string') {
+          return res.status(400).json({
+            success: false,
+            error: 'Email verification is required before deleting saved memory.',
+            code: 'SECURE_ACTION_OTP_REQUIRED',
+          });
+        }
+        const accountDeletionService = require('../../services/accountDeletionService');
+        const result = await accountDeletionService.completeSecureAction(userId, 'memory_deletion', securityCode);
+        return res.status(200).json(result);
+      }
 
+      const { wipeUserMemory } = require('../../services/memory/deletion/userMemoryWipeService');
       const result = await wipeUserMemory(userId, { reason: wipeReason });
 
       return res.status(200).json(result);
     } catch (err) {
+      if (err.code === 'SECURE_ACTION_OTP_INVALID') {
+        return res.status(400).json({
+          success: false,
+          message: 'The verification code is invalid or expired.',
+          code: err.code,
+        });
+      }
       return res.status(500).json({
         success: false,
         error: err.message,

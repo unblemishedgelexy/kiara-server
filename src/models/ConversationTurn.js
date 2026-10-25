@@ -16,4 +16,6 @@ const ConversationTurnSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+ConversationTurnSchema.index({ userId: 1, sessionId: 1, timestamp: -1 });
+
 module.exports = mongoose.models.ConversationTurn || mongoose.model('ConversationTurn', ConversationTurnSchema);

@@ -21,19 +21,6 @@ const MEMORY = {
   score: 0.9,
 };
 
-async function captureRetrievalLog(callback) {
-  const originalInfo = console.info;
-  let event = null;
-  console.info = (label, payload) => {
-    if (label === '[MEMORY_RETRIEVAL_STAGE]') event = JSON.parse(payload);
-  };
-  try {
-    return { result: await callback(), event };
-  } finally {
-    console.info = originalInfo;
-  }
-}
-
 test('routes an explicit current-fact question to STM and canonical memory', () => {
   const route = routeMemorySources('What is my current project?');
   assert.deepEqual(route.sources, ['STM', 'LONG_TERM']);
@@ -63,12 +50,12 @@ test('uses bounded sources when a non-empty query receives no initial route', as
   });
 
   assert.equal(routeMemorySources(QUERY).route, 'NONE');
-  const { result, event } = await captureRetrievalLog(() => adapter.retrieveMemoryContext({
+  const result = await adapter.retrieveMemoryContext({
     userId: USER_ID,
     query: QUERY,
     sessionId: 'isolated-session',
     options: { traceId: 'isolated-trace' },
-  }));
+  });
 
   assert.equal(stmCalls.length, 1);
   assert.equal(stmCalls[0].userId, USER_ID);
@@ -81,9 +68,9 @@ test('uses bounded sources when a non-empty query receives no initial route', as
   assert.equal(result.memories[0].version, MEMORY.version);
   assert.deepEqual(result.memories[0].provenance, MEMORY.provenance);
   assert.match(result.context, /ORBIT-ALDER-731/);
-  assert.equal(event.status, 'MEMORY_FOUND');
-  assert.equal(event.routeMissFallback, true);
-  assert.deepEqual(event.sourcesAttempted, ['STM', 'LONG_TERM']);
+  assert.equal(result.metadata.status, 'MEMORY_FOUND');
+  assert.equal(result.metadata.routeMissFallback, true);
+  assert.deepEqual(result.metadata.sourcesAttempted, ['stm', 'long_term']);
 });
 
 test('reports NO_MATCH after one bounded fallback pass', async () => {
@@ -99,18 +86,17 @@ test('reports NO_MATCH after one bounded fallback pass', async () => {
     }),
   });
 
-  const { result, event } = await captureRetrievalLog(() => adapter.retrieveMemoryContext({
+  const result = await adapter.retrieveMemoryContext({
     userId: USER_ID,
     query: QUERY,
     sessionId: 'isolated-session',
     options: { traceId: 'no-match-trace' },
-  }));
+  });
 
   assert.equal(result.ok, true);
   assert.equal(result.metadata.status, 'NO_MATCH');
-  assert.equal(event.status, 'NO_MATCH');
-  assert.equal(event.fallbackPasses, 1);
-  assert.deepEqual(event.sourcesAttempted, ['STM', 'LONG_TERM', 'SEMANTIC']);
+  assert.equal(result.metadata.fallbackPasses, 1);
+  assert.deepEqual(result.metadata.sourcesAttempted, ['stm', 'long_term', 'semantic']);
   assert.equal(retrieverCalls.length, 2);
   assert.equal(retrieverCalls[1].includeStructured, false);
   assert.equal(retrieverCalls[1].includeSemantic, true);
@@ -134,12 +120,12 @@ test('adds only validated planner sources to the authenticated empty-route fallb
     }),
   });
 
-  const { result, event } = await captureRetrievalLog(() => adapter.retrieveMemoryContext({
+  const result = await adapter.retrieveMemoryContext({
     userId: USER_ID,
     query: QUERY,
     sessionId: 'isolated-session',
     options: { traceId: 'planner-integration-trace' },
-  }));
+  });
 
   assert.equal(result.metadata.status, 'NO_MATCH');
   assert.equal(result.metadata.plannerStatus, 'VALID');
@@ -147,10 +133,12 @@ test('adds only validated planner sources to the authenticated empty-route fallb
   assert.equal(plannerCalls.length, 1);
   assert.equal(plannerCalls[0].query, QUERY);
   assert.equal(plannerCalls[0].options.traceId, 'planner-integration-trace');
-  assert.equal(retrieverCalls.length, 1);
+  assert.equal(retrieverCalls.length, 2);
   assert.equal(retrieverCalls[0].userId, USER_ID);
-  assert.deepEqual(event.sourcesAttempted, ['STM', 'LONG_TERM', 'SEMANTIC']);
-  assert.equal(event.plannerStatus, 'VALID');
+  assert.equal(retrieverCalls[0].options.includeStructured, true);
+  assert.equal(retrieverCalls[1].options.includeSemantic, true);
+  assert.deepEqual(result.metadata.sourcesAttempted, ['stm', 'long_term', 'semantic']);
+  assert.equal(result.metadata.plannerStatus, 'VALID');
 });
 
 test('does not call the query planner when the feature flag is disabled', async () => {
@@ -169,17 +157,17 @@ test('does not call the query planner when the feature flag is disabled', async 
     }),
   });
 
-  const { result, event } = await captureRetrievalLog(() => adapter.retrieveMemoryContext({
+  const result = await adapter.retrieveMemoryContext({
     userId: USER_ID,
     query: QUERY,
     sessionId: 'isolated-session',
     options: { traceId: 'planner-disabled-trace' },
-  }));
+  });
 
   assert.equal(result.metadata.status, 'NO_MATCH');
   assert.equal(plannerCalls, 0);
-  assert.equal(event.plannerStatus, 'DISABLED');
-  assert.deepEqual(event.sourcesAttempted, ['STM', 'LONG_TERM', 'SEMANTIC']);
+  assert.equal(result.metadata.plannerStatus, 'DISABLED');
+  assert.deepEqual(result.metadata.sourcesAttempted, ['stm', 'long_term', 'semantic']);
 });
 
 test('keeps deterministic sources when the enabled planner fails', async () => {
@@ -198,20 +186,20 @@ test('keeps deterministic sources when the enabled planner fails', async () => {
     }),
   });
 
-  const { result, event } = await captureRetrievalLog(() => adapter.retrieveMemoryContext({
+  const result = await adapter.retrieveMemoryContext({
     userId: USER_ID,
     query: QUERY,
     sessionId: 'isolated-session',
     options: { traceId: 'planner-provider-failure-trace' },
-  }));
+  });
 
   assert.equal(result.metadata.status, 'NO_MATCH');
-  assert.equal(event.plannerStatus, 'FALLBACK');
+  assert.equal(result.metadata.plannerStatus, 'FALLBACK');
   assert.equal(retrieverCalls.length, 2);
   assert.equal(retrieverCalls[0].options.includeStructured, true);
   assert.equal(retrieverCalls[0].options.includeSemantic, false);
-  assert.deepEqual(event.sourcesAttempted, ['STM', 'LONG_TERM', 'SEMANTIC']);
-  assert.equal(event.fallbackPasses, 1);
+  assert.deepEqual(result.metadata.sourcesAttempted, ['stm', 'long_term', 'semantic']);
+  assert.equal(result.metadata.fallbackPasses, 1);
 });
 
 test('reports SOURCE_ERROR when all attempted retrieval passes fail', async () => {
@@ -223,31 +211,25 @@ test('reports SOURCE_ERROR when all attempted retrieval passes fail', async () =
     }),
   });
 
-  const { result, event } = await captureRetrievalLog(() => adapter.retrieveMemoryContext({
+  const result = await adapter.retrieveMemoryContext({
     userId: USER_ID,
     query: QUERY,
     sessionId: 'isolated-session',
     options: { traceId: 'source-error-trace' },
-  }));
+  });
 
   assert.equal(result.ok, false);
   assert.equal(result.metadata.status, 'SOURCE_ERROR');
-  assert.equal(event.status, 'SOURCE_ERROR');
-  assert.equal(event.fallbackPasses, 1);
-  assert.equal(event.sourceFailures.stm, 'STM_DOWN');
-  assert.equal(event.sourceFailures.canonical, 'CANONICAL_DOWN');
+  assert.equal(result.metadata.fallbackPasses, 1);
+  assert.equal(result.metadata.sourceFailures.stm, 'STM_DOWN');
+  assert.equal(result.metadata.sourceFailures.long_term, 'CANONICAL_DOWN');
 });
 
 test('bounds a stalled canonical source and reports its timeout', async () => {
   const retrieverCalls = [];
-  const lateSettlements = [];
-  const originalWarn = console.warn;
-  console.warn = (label, payload) => {
-    if (label === '[MEMORY_SOURCE_LATE_SETTLEMENT]') lateSettlements.push(JSON.parse(payload));
-  };
   const adapter = createMemoryRetrievalAdapter({
     plannerEnabled: false,
-    sourceTimeoutMs: 5,
+    sourceTimeoutMs: 10000,
     stmAdapter: { async getRecentContext() { return { memories: [] }; } },
     retrieverFactory: () => ({
       async retrieve(options) {
@@ -262,25 +244,128 @@ test('bounds a stalled canonical source and reports its timeout', async () => {
     }),
   });
 
-  try {
-    const { result, event } = await captureRetrievalLog(() => adapter.retrieveMemoryContext({
-      userId: USER_ID,
-      query: QUERY,
-      sessionId: 'isolated-session',
-      options: { traceId: 'canonical-timeout-trace' },
-    }));
-    await new Promise((resolve) => setTimeout(resolve, 30));
+  const result = await adapter.retrieveMemoryContext({
+    userId: USER_ID,
+    query: QUERY,
+    sessionId: 'isolated-session',
+    options: { traceId: 'canonical-timeout-trace', sourceTimeoutMs: 5 },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
 
-    assert.equal(result.ok, false);
-    assert.equal(result.metadata.status, 'SOURCE_ERROR');
-    assert.equal(event.sourceFailures.canonical, 'CANONICAL_RETRIEVAL_TIMEOUT');
-    assert.equal(event.fallbackPasses, 1);
-    assert.equal(retrieverCalls.length, 2);
-    assert.deepEqual(event.sourcesAttempted, ['STM', 'LONG_TERM', 'SEMANTIC']);
-    assert.equal(lateSettlements.length, 1);
-    assert.equal(lateSettlements[0].status, 'failed');
-    assert.equal(lateSettlements[0].errorCode, 'LATE_CANONICAL_FAILURE');
-  } finally {
-    console.warn = originalWarn;
-  }
+  assert.equal(result.ok, false);
+  assert.equal(result.metadata.status, 'SOURCE_ERROR');
+  assert.equal(result.metadata.sourceFailures.long_term, 'CANONICAL_RETRIEVAL_TIMEOUT');
+  assert.equal(result.metadata.fallbackPasses, 1);
+  assert.equal(retrieverCalls.length, 2);
+  assert.deepEqual(result.metadata.sourcesAttempted, ['stm', 'long_term', 'semantic']);
+});
+
+test('keeps the complete fallback within the Live overall retrieval deadline', async () => {
+  const canonicalCalls = [];
+  let stmCalls = 0;
+  const adapter = createMemoryRetrievalAdapter({
+    plannerEnabled: false,
+    sourceTimeoutMs: 10000,
+    stmAdapter: {
+      async getRecentContext() {
+        stmCalls += 1;
+        return { memories: [] };
+      },
+    },
+    retrieverFactory: () => ({
+      async retrieve({ options }) {
+        canonicalCalls.push(options);
+        if (options.includeStructured) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          return { memories: [], semantic: { status: 'NOT_REQUESTED' } };
+        }
+        return new Promise(() => {});
+      },
+    }),
+  });
+  const startedAt = Date.now();
+
+  const result = await adapter.retrieveMemoryContext({
+    userId: USER_ID,
+    query: 'What is my current project?',
+    sessionId: 'isolated-session',
+    options: {
+      traceId: 'live-timeout-budget-trace',
+      sourceTimeoutMs: 1000,
+      retrievalTimeoutMs: 500,
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.metadata.fallbackPasses, 1);
+  assert.equal(canonicalCalls.length, 2);
+  assert.equal(canonicalCalls[1].includeSemantic, true);
+  assert.equal(stmCalls, 1);
+  assert.ok(Date.now() - startedAt < 900, 'the fallback must use only the remaining retrieval budget');
+  assert.equal(result.metadata.sourceFailures.semantic, 'MEMORY_RETRIEVAL_DEADLINE');
+});
+
+test('deduplicates identical in-flight requests across trace IDs', async () => {
+  let stmCalls = 0;
+  let release;
+  const waitForSource = new Promise((resolve) => { release = resolve; });
+  const adapter = createMemoryRetrievalAdapter({
+    plannerEnabled: false,
+    stmAdapter: {
+      async getRecentContext() {
+        stmCalls += 1;
+        await waitForSource;
+        return { memories: [] };
+      },
+    },
+    retrieverFactory: () => ({
+      async retrieve() {
+        return { memories: [], semantic: { status: 'NOT_REQUESTED' } };
+      },
+    }),
+  });
+  const request = {
+    userId: USER_ID,
+    query: 'What is my current project?',
+    sessionId: 'same-session',
+    options: { traceId: 'first-trace' },
+  };
+  const first = adapter.retrieveMemoryContext(request);
+  const second = adapter.retrieveMemoryContext({
+    ...request,
+    options: { traceId: 'second-trace' },
+  });
+  release();
+
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(stmCalls, 1);
+  assert.equal(firstResult, secondResult);
+});
+
+test('marks a result partial when one source fails but another returns memory', async () => {
+  const adapter = createMemoryRetrievalAdapter({
+    plannerEnabled: false,
+    stmAdapter: {
+      async getRecentContext() {
+        throw Object.assign(new Error('Redis unavailable'), { code: 'REDIS_UNAVAILABLE' });
+      },
+    },
+    retrieverFactory: () => ({
+      async retrieve() {
+        return { memories: [MEMORY], semantic: { status: 'NOT_REQUESTED' } };
+      },
+    }),
+  });
+
+  const result = await adapter.retrieveMemoryContext({
+    userId: USER_ID,
+    query: 'What is my current project?',
+    sessionId: 'partial-session',
+    options: { traceId: 'partial-result-trace' },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.metadata.status, 'PARTIAL');
+  assert.equal(result.metadata.sourceFailures.stm, 'REDIS_UNAVAILABLE');
+  assert.equal(result.memories[0].id, MEMORY.id);
 });

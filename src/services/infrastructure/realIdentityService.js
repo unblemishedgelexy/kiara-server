@@ -384,7 +384,6 @@ async function findProfileByDescriptors(userId, faceDescriptor, voiceDescriptor,
 async function learnPerson(userId, personId, name, relationship, faceDescriptor, voiceDescriptor, voiceCharacteristics) {
   try {
     let profile = null;
-    console.log('[learnPerson] start', userId, { personId, name });
 
     // Acquire a per-user mutex to serialize learn operations for the same user.
     const userLockKey = `user:${userId}`;
@@ -409,9 +408,7 @@ async function learnPerson(userId, personId, name, relationship, faceDescriptor,
 
     if (!profile) {
       // First, try descriptor-similarity lookup (non-atomic)
-      console.log('[learnPerson] before findProfileByDescriptors', userId);
       profile = await findProfileByDescriptors(userId, faceDescriptor, voiceDescriptor, voiceCharacteristics);
-      console.log('[learnPerson] after findProfileByDescriptors', userId, !!profile);
     }
 
     if (!profile) {
@@ -468,9 +465,7 @@ async function learnPerson(userId, personId, name, relationship, faceDescriptor,
         // also include raw descriptors on insert for compatibility
         if (faceDescriptor) insertFields.faceDescriptor = faceDescriptor;
         if (voiceDescriptor) insertFields.voiceDescriptor = voiceDescriptor;
-        console.log('[learnPerson] attempting upsert for', filter);
         profile = await tryUpsert(filter, insertFields);
-        console.log('[learnPerson] upsert result', !!profile, profile && profile._id && profile._id.toString());
       }
 
       // If still not found, create a new profile (should be rare)
@@ -530,7 +525,6 @@ async function learnPerson(userId, personId, name, relationship, faceDescriptor,
     }
 
     profile = await profile.save();
-    console.log('[learnPerson] saved profile', profile._id.toString());
     
     // release user lock before returning
     if (releaseUser) {

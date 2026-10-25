@@ -6,13 +6,15 @@ const usageService = require('../services/subscriptions/usageService');
 function sendError(res, error) {
   const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
   if (statusCode >= 500) {
-    console.error('[SUBSCRIPTION_ERROR]', error instanceof Error ? error.message : String(error));
+    console.error('[SUBSCRIPTION_ERROR]', error?.name || error?.code || 'SubscriptionError');
   }
   return res.status(statusCode).json({
     success: false,
     code: error?.code || 'SUBSCRIPTION_REQUEST_FAILED',
-    message: error instanceof Error ? error.message : 'Subscription request failed.',
-    ...(error?.details ? { details: error.details } : {}),
+    message: statusCode >= 500
+      ? 'Subscription service is temporarily unavailable.'
+      : error instanceof Error ? error.message : 'Subscription request failed.',
+    ...(statusCode < 500 && error?.details ? { details: error.details } : {}),
   });
 }
 

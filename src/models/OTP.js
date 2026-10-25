@@ -5,7 +5,7 @@ const OTPSchema = new mongoose.Schema({
   codeHash: { type: String }, // Hashed OTP code (bcrypt) - store hash for security
   type: { 
     type: String, 
-    enum: ['REGISTER_EMAIL', 'REGISTER_MOBILE', 'FORGOT_PASSWORD_EMAIL', 'FORGOT_PASSWORD_MOBILE', 'EMAIL_VERIFICATION_OTP', 'CHANGE_EMAIL', 'CHANGE_MOBILE'],
+    enum: ['REGISTER_EMAIL', 'REGISTER_MOBILE', 'FORGOT_PASSWORD_EMAIL', 'FORGOT_PASSWORD_MOBILE', 'EMAIL_VERIFICATION_OTP', 'CHANGE_EMAIL', 'CHANGE_MOBILE', 'ACCOUNT_DELETION_EMAIL', 'MEMORY_DELETION_EMAIL'],
     default: 'REGISTER_EMAIL' 
   },
   used: { type: Boolean, default: false },

@@ -48,7 +48,12 @@ async function createAuthRequest(returnUrl) {
     throw new Error('MongoDB is not connected yet. Google OAuth is unavailable until the database connection completes.');
   }
 
-  await OAuthStateModel.create({ state, codeVerifier, returnUrl, expiresAt });
+  await OAuthStateModel.create({
+    state,
+    codeVerifier,
+    returnUrl,
+    expiresAt,
+  });
 
   const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   authUrl.searchParams.set('client_id', env.googleClientId);

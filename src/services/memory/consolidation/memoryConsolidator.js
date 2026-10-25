@@ -47,6 +47,7 @@ class MemoryConsolidator {
     if (!this.repository) {
       return {
         persisted: false,
+        persistenceAttempted: false,
         reason: 'No repository is configured for consolidation persistence.',
       };
     }
@@ -132,6 +133,7 @@ class MemoryConsolidator {
 
       return {
         persisted: true,
+        persistenceAttempted: true,
         result: persisted,
         cacheWarning,
         mongoLatencyMs,
@@ -140,6 +142,7 @@ class MemoryConsolidator {
     } catch (error) {
       return {
         persisted: false,
+        persistenceAttempted: true,
         error,
         mongoLatencyMs: mongoLatencyMs || (mongoStartedAt ? Date.now() - mongoStartedAt : 0),
         cacheLatencyMs,
@@ -158,12 +161,14 @@ class MemoryConsolidator {
 
     const base = {
       decision: resolution.decision,
+      reasonCode: resolution.reasonCode || null,
       candidate: normalizedCandidate,
       existingMemory: relevantExisting || null,
       replacementMemory: null,
       reason: resolution.reason,
       changes: resolution.changes || {},
       persisted: false,
+      persistenceAttempted: false,
     };
 
     if (resolution.decision === 'DUPLICATE' || resolution.decision === 'IGNORE') {

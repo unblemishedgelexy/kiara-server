@@ -9,6 +9,7 @@ const redisService = require('../infrastructure/redisService');
 const mongoose = require('mongoose');
 const ConversationTurn = require('../../models/ConversationTurn');
 const { env } = require('../../config/env');
+const promotionQueueEvents = require('../memory/promotion/promotionQueueEvents');
 const {
   RedisConnectionError,
   RedisTimeoutError,
@@ -490,7 +491,6 @@ class WorkingMemoryRedis {
       }
 
       const key = this.buildKey(userId);
-      const existingTurnsCount = await client.lLen(key);
 
       const normalizedUserMessage = this.normalizeMessage(userMessage);
       const normalizedAssistantMessage = this.normalizeMessage(aiResponse);
@@ -503,48 +503,28 @@ class WorkingMemoryRedis {
         assistantMessage: normalizedAssistantMessage,
       });
 
-      // Capture raw list before push to compute exact compression metrics
-      let rawBefore = [];
-      try {
-        rawBefore = await client.lRange(key, 0, -1);
-      } catch (e) {
-        rawBefore = [];
-      }
-
       const multi = this.createRedisPipeline(client);
       multi.rPush(key, payload);
       multi.expire(key, INACTIVE_KEY_TTL_SECONDS);
 
-      const start = Date.now();
       const results = await this.executeRedisPipeline(multi, { userId, sessionId });
-      const saveDurationMs = Date.now() - start;
-
 
       if (!results || results.length < 2) {
         throw new RedisConnectionError('Pipeline execution failed');
       }
 
-      let cleanupCount = 0;
       try {
-        cleanupCount = await this.cleanupExpiredTurns(client, key);
+        await this.cleanupExpiredTurns(client, key);
       } catch (cleanupError) {
+        console.warn('[STM_CLEANUP]', JSON.stringify({
+          status: 'FAILED',
+          errorCode: cleanupError?.code || cleanupError?.name || 'STM_CLEANUP_FAILURE',
+        }));
       }
 
       const totalTurns = await client.lLen(key);
-
       if (idempotencyKey) {
         await client.set(idempotencyKey, JSON.stringify({ status: 'completed', totalTurns, turnId }), { EX: INACTIVE_KEY_TTL_SECONDS });
-      }
-
-      // Compression telemetry: measure characters before/after and report
-      try {
-        const rawList = await client.lRange(key, 0, -1);
-        const charsAfter = rawList.map((r) => String(r).length).reduce((a, b) => a + b, 0);
-        const charsBefore = rawBefore.map((r) => String(r).length).reduce((a, b) => a + b, 0);
-        const ratio = charsBefore > 0 ? (charsAfter / charsBefore) : 1;
-        const avgCharsPerTurn = totalTurns > 0 ? Math.round(charsAfter / totalTurns) : 0;
-        const currentTtl = await client.ttl(key);
-      } catch (obsErr) {
       }
 
       // Persist to Mongo (backup)
@@ -576,10 +556,7 @@ class WorkingMemoryRedis {
         }
       }
 
-      try {
-        await this.enqueuePromotionCandidate(userId);
-      } catch (queueError) {
-      }
+      await this.enqueuePromotionCandidate(userId);
 
       return {
         success: true,
@@ -718,35 +695,46 @@ class WorkingMemoryRedis {
       ops.zAdd(queueKey, [{ score: dueAt, value: String(userId) }]);
       ops.expire(queueKey, PROMOTION_QUEUE_TTL_SECONDS);
       await this.executeRedisPipeline(ops, { userId });
+      promotionQueueEvents.emit('work-available');
 
       return true;
     } catch (error) {
+      console.warn('[MEMORY_PROMOTION_QUEUE]', JSON.stringify({
+        status: 'ENQUEUE_FAILURE',
+        errorCode: error?.code || error?.name || 'PROMOTION_QUEUE_ENQUEUE_FAILURE',
+      }));
       return false;
     }
   }
 
   static async getPromotionCandidates(limit = 20) {
-    try {
-      const client = await redisService.getRedisClient();
-      if (!client) {
-        throw new RedisConnectionError('Redis client not initialized');
-      }
+    const client = await redisService.getRedisClient();
+    if (!client) {
+      throw new RedisConnectionError('Redis client not initialized');
+    }
 
-      const queueKey = this.buildPromotionQueueKey();
-      const count = Number.isInteger(limit) && limit > 0 ? limit : 1;
-      const members = await client.zRangeByScore(queueKey, 0, Date.now(), {
-        LIMIT: {
-          offset: 0,
-          count,
-        },
-      });
-      if (!members || members.length === 0) {
-        return [];
-      }
-      return members.slice(0, count).map(String);
-    } catch (error) {
+    const queueKey = this.buildPromotionQueueKey();
+    const count = Number.isInteger(limit) && limit > 0 ? limit : 1;
+    const members = await client.zRangeByScore(queueKey, 0, Date.now(), {
+      LIMIT: {
+        offset: 0,
+        count,
+      },
+    });
+    if (!members || members.length === 0) {
       return [];
     }
+    return members.slice(0, count).map(String);
+  }
+
+  static async getNextPromotionDueAt() {
+    const client = await redisService.getRedisClient();
+    if (!client) {
+      throw new RedisConnectionError('Redis client not initialized');
+    }
+    const queue = await client.zRangeWithScores(this.buildPromotionQueueKey(), 0, 0);
+    const dueAt = Number(queue?.[0]?.score);
+    return Number.isFinite(dueAt) ? dueAt : null;
   }
 
   static async removePromotionCandidate(userId) {
@@ -1375,8 +1363,18 @@ class WorkingMemoryRedis {
     }
 
     rejectedMemoryCleanupTimer = setInterval(() => {
-      this.cleanupRejectedSemanticMemories().catch((err) => {
-      });
+      this.cleanupRejectedSemanticMemories()
+        .then((result) => {
+          if (result?.error) {
+            console.error('[REJECTED_MEMORY_CLEANUP]', JSON.stringify({ status: 'FAILURE' }));
+          }
+        })
+        .catch((error) => {
+          console.error('[REJECTED_MEMORY_CLEANUP]', JSON.stringify({
+            status: 'FAILURE',
+            errorCode: error?.code || error?.name || 'REJECTED_MEMORY_CLEANUP_FAILURE',
+          }));
+        });
     }, this.getRejectedMemoryCleanupIntervalMs());
 
     return rejectedMemoryCleanupTimer;

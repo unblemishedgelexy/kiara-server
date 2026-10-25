@@ -2,6 +2,7 @@ const { randomUUID } = require('crypto');
 const Subscription = require('../../models/Subscription');
 const SubscriptionUsage = require('../../models/SubscriptionUsage');
 const { findPaidPlan, freePlan, getPublicPlans, toEntitlementPlan } = require('../../config/subscriptionPlans');
+const { env } = require('../../config/env');
 const { isCheckoutConfigured } = require('../razorpay/razorpayClient');
 
 const CHAT_RESERVATION_TTL_MS = 15 * 60 * 1000;
@@ -102,9 +103,9 @@ async function getOverview(userId, now = new Date()) {
       periodEnd: period.periodEnd,
       liveSeconds: usage?.liveSeconds || 0,
       liveMinutes: Math.floor((usage?.liveSeconds || 0) / 60),
-      liveMinutesLimit: null,
+      liveMinutesLimit: currentPaidPlan?.liveMinutes ?? null,
       chatMessages: usage?.chatMessages || 0,
-      chatMessagesLimit: null,
+      chatMessagesLimit: currentPaidPlan?.chatMessages ?? null,
     },
   };
 }
@@ -112,39 +113,72 @@ async function getOverview(userId, now = new Date()) {
 async function reserveChatMessage(userId) {
   const now = new Date();
   const period = getUtcBillingPeriod(now);
-  const usage = await ensureUsageRow(userId, period);
+  const [usage, subscription] = await Promise.all([
+    ensureUsageRow(userId, period),
+    getCurrentSubscription(userId, now),
+  ]);
+  const plan = subscription ? findPaidPlan(subscription.planId) : null;
+  const limit = plan?.chatMessages ?? null;
   const reservationId = randomUUID();
   const expiresAt = new Date(now.getTime() + CHAT_RESERVATION_TTL_MS);
 
-  // Remove expired reservations, then reserve atomically. No plan/monthly message cap.
   await SubscriptionUsage.updateOne(
     { _id: usage._id },
     { $pull: { pendingChatReservations: { expiresAt: { $lte: now } } } },
   );
 
+  const filter = { _id: usage._id };
+  if (limit !== null) {
+    filter.$expr = {
+      $lt: [
+        {
+          $add: [
+            { $ifNull: ['$chatMessages', 0] },
+            { $size: { $ifNull: ['$pendingChatReservations', []] } },
+          ],
+        },
+        limit,
+      ],
+    };
+  }
   const updated = await SubscriptionUsage.findOneAndUpdate(
-    { _id: usage._id },
+    filter,
     { $push: { pendingChatReservations: { id: reservationId, expiresAt } } },
     { returnDocument: 'after' },
   );
 
   if (!updated) {
+    const latest = await SubscriptionUsage.findById(usage._id).lean();
+    const activeReservations = (latest?.pendingChatReservations || [])
+      .filter((reservation) => reservation.expiresAt > now).length;
+    const currentUsage = (latest?.chatMessages || 0) + activeReservations;
+    if (limit !== null && currentUsage >= limit) {
+      throw createUsageError(
+        'The monthly AI chat message limit for this plan has been reached.',
+        'CHAT_QUOTA_EXCEEDED',
+        402,
+        { usage: currentUsage, limit, plan: plan.id },
+      );
+    }
     throw createUsageError('Unable to reserve an AI chat message. Please retry.', 'CHAT_RESERVATION_FAILED', 503);
   }
 
   return {
     reservationId,
-    usage: updated.chatMessages || 0,
-    limit: null,
-    plan: 'unlimited',
+    usage: (updated.chatMessages || 0) + (updated.pendingChatReservations || []).length,
+    limit,
+    plan: plan?.id || 'free',
   };
 }
 
 async function commitChatMessage(userId, reservationId) {
+  const now = new Date();
   const result = await SubscriptionUsage.findOneAndUpdate(
     {
       userId,
-      'pendingChatReservations.id': reservationId,
+      pendingChatReservations: {
+        $elemMatch: { id: reservationId, expiresAt: { $gt: now } },
+      },
     },
     {
       $pull: { pendingChatReservations: { id: reservationId } },
@@ -167,8 +201,24 @@ async function releaseChatReservation(userId, reservationId) {
 async function startLiveSession(userId, lifecycleTrigger = 'LIVE_SESSION_START', now = new Date()) {
   const period = getUtcBillingPeriod(now);
   const usage = await ensureUsageRow(userId, period);
+  const subscription = await getCurrentSubscription(userId, now);
+  const plan = subscription ? findPaidPlan(subscription.planId) : null;
+  const maxLiveSeconds = plan ? plan.liveMinutes * 60 : null;
   const isResume = lifecycleTrigger === 'LIVE_TOKEN_REFRESH' || lifecycleTrigger === 'LIVE_SESSION_RECONNECT';
-  const activeSessions = Array.isArray(usage.activeLiveSessions) ? usage.activeLiveSessions : [];
+  const storedSessions = Array.isArray(usage.activeLiveSessions) ? usage.activeLiveSessions : [];
+  const staleSessions = storedSessions.filter((session) =>
+    !session.lastHeartbeatAt
+    || new Date(session.lastHeartbeatAt).getTime() <= now.getTime() - LIVE_SESSION_STALE_MS
+  );
+  for (const session of staleSessions) {
+    try {
+      await endLiveSession(userId, session.sessionId, now);
+    } catch (error) {
+      if (error.code !== 'LIVE_SESSION_NOT_ACTIVE') throw error;
+      await abortLiveSession(userId, session.sessionId);
+    }
+  }
+  const activeSessions = storedSessions.filter((session) => !staleSessions.includes(session));
 
   // A reconnect/refresh reuses an existing live session if one exists.
   // A normal start always creates a separate session, allowing multiple tabs/devices.
@@ -188,19 +238,48 @@ async function startLiveSession(userId, lifecycleTrigger = 'LIVE_SESSION_START',
     }
   }
 
-  // Drop stale sessions without blocking new sessions.
-  await SubscriptionUsage.updateOne(
-    { _id: usage._id },
-    { $pull: { activeLiveSessions: { lastHeartbeatAt: { $lte: new Date(now.getTime() - LIVE_SESSION_STALE_MS) } } } },
-  );
-
   const sessionId = randomUUID();
+  const claimFilter = { _id: usage._id };
+  const admissionChecks = [
+    {
+      $lt: [
+        { $size: { $ifNull: ['$activeLiveSessions', []] } },
+        env.maxActiveLiveSessionsPerAccount,
+      ],
+    },
+  ];
+  if (maxLiveSeconds !== null) {
+    admissionChecks.push({
+      $lt: [{ $ifNull: ['$liveSeconds', 0] }, maxLiveSeconds],
+    });
+  }
+  claimFilter.$expr = { $and: admissionChecks };
   const claimed = await SubscriptionUsage.findOneAndUpdate(
-    { _id: usage._id },
+    claimFilter,
     { $push: { activeLiveSessions: { sessionId, startedAt: now, lastHeartbeatAt: now } } },
     { returnDocument: 'after' },
   );
   if (!claimed) {
+    const latest = await SubscriptionUsage.findById(usage._id).lean();
+    if (maxLiveSeconds !== null && (latest?.liveSeconds || 0) >= maxLiveSeconds) {
+      throw createUsageError(
+        'The monthly Gemini Live voice limit for this plan has been reached.',
+        'LIVE_QUOTA_EXCEEDED',
+        402,
+        { liveSeconds: latest?.liveSeconds || 0, limitSeconds: maxLiveSeconds, plan: plan.id },
+      );
+    }
+    const activeCount = (latest?.activeLiveSessions || []).filter((session) =>
+      session.lastHeartbeatAt && new Date(session.lastHeartbeatAt).getTime() > now.getTime() - LIVE_SESSION_STALE_MS
+    ).length;
+    if (activeCount >= env.maxActiveLiveSessionsPerAccount) {
+      throw createUsageError(
+        'The maximum number of active Kiara Live sessions has been reached.',
+        'ACTIVE_LIVE_SESSION_LIMIT',
+        429,
+        { limit: env.maxActiveLiveSessionsPerAccount },
+      );
+    }
     throw createUsageError('Unable to start a Kiara Live session. Please retry.', 'LIVE_SESSION_START_FAILED', 503);
   }
   return { sessionId, created: true };
@@ -224,53 +303,83 @@ async function getActiveLiveSession(userId) {
 
 async function heartbeatLiveSession(userId, sessionId, now = new Date()) {
   const period = getUtcBillingPeriod(now);
-  const usage = await SubscriptionUsage.findOne({ userId, periodStart: period.periodStart });
-  const session = usage?.activeLiveSessions?.find((item) => item.sessionId === sessionId);
-  if (!usage || !session || !session.lastHeartbeatAt) {
-    throw createUsageError('Live usage session is no longer active.', 'LIVE_SESSION_NOT_ACTIVE', 409);
-  }
+  const subscription = await getCurrentSubscription(userId, now);
+  const plan = subscription ? findPaidPlan(subscription.planId) : null;
+  const maxLiveSeconds = plan ? plan.liveMinutes * 60 : null;
 
-  const previousHeartbeat = new Date(session.lastHeartbeatAt);
-  const elapsedSeconds = Math.max(0, Math.min(
-    MAX_LIVE_HEARTBEAT_SECONDS,
-    Math.floor((now.getTime() - previousHeartbeat.getTime()) / 1000),
-  ));
-  if (elapsedSeconds === 0) {
-    return { allowed: true, billedSeconds: 0, liveSeconds: usage.liveSeconds || 0 };
-  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const usage = await SubscriptionUsage.findOne({ userId, periodStart: period.periodStart });
+    const session = usage?.activeLiveSessions?.find((item) => item.sessionId === sessionId);
+    if (!usage || !session || !session.lastHeartbeatAt) {
+      throw createUsageError('Live usage session is no longer active.', 'LIVE_SESSION_NOT_ACTIVE', 409);
+    }
 
-  // Track usage for analytics, but do not enforce a monthly voice-minute cap.
-  const updated = await SubscriptionUsage.findOneAndUpdate(
-    {
+    const previousHeartbeat = new Date(session.lastHeartbeatAt);
+    const elapsedSeconds = Math.max(0, Math.min(
+      MAX_LIVE_HEARTBEAT_SECONDS,
+      Math.floor((now.getTime() - previousHeartbeat.getTime()) / 1000),
+    ));
+    if (elapsedSeconds === 0) {
+      return { allowed: true, billedSeconds: 0, liveSeconds: usage.liveSeconds || 0, limitReached: false };
+    }
+
+    const charge = calculateLiveCharge(elapsedSeconds, usage.liveSeconds || 0, maxLiveSeconds);
+    if (charge.billedSeconds === 0 && charge.limitReached) {
+      await abortLiveSession(userId, sessionId);
+      return {
+        allowed: false,
+        billedSeconds: 0,
+        liveSeconds: usage.liveSeconds || 0,
+        limitReached: true,
+        limitSeconds: maxLiveSeconds,
+      };
+    }
+
+    const filter = {
       _id: usage._id,
       activeLiveSessions: { $elemMatch: { sessionId, lastHeartbeatAt: previousHeartbeat } },
-    },
-    {
-      $inc: { liveSeconds: elapsedSeconds },
-      $set: { 'activeLiveSessions.$.lastHeartbeatAt': now },
-    },
-    { returnDocument: 'after' },
-  );
-
-  if (!updated) {
-    return { allowed: true, billedSeconds: 0, liveSeconds: usage.liveSeconds || 0 };
+    };
+    if (maxLiveSeconds !== null) {
+      filter.$expr = {
+        $lte: [
+          { $add: [{ $ifNull: ['$liveSeconds', 0] }, charge.billedSeconds] },
+          maxLiveSeconds,
+        ],
+      };
+    }
+    const updated = await SubscriptionUsage.findOneAndUpdate(
+      filter,
+      {
+        $inc: { liveSeconds: charge.billedSeconds },
+        $set: { 'activeLiveSessions.$.lastHeartbeatAt': now },
+      },
+      { returnDocument: 'after' },
+    );
+    if (updated) {
+      const total = updated.liveSeconds || 0;
+      const limitReached = maxLiveSeconds !== null && total >= maxLiveSeconds;
+      if (limitReached) await abortLiveSession(userId, sessionId);
+      return {
+        allowed: !limitReached,
+        billedSeconds: charge.billedSeconds,
+        liveSeconds: total,
+        limitReached,
+        ...(maxLiveSeconds === null ? {} : { limitSeconds: maxLiveSeconds }),
+      };
+    }
   }
-  return {
-    allowed: true,
-    billedSeconds: elapsedSeconds,
-    liveSeconds: updated.liveSeconds || 0,
-    limitReached: false,
-  };
+
+  throw createUsageError('Live usage changed during the heartbeat. Please retry.', 'LIVE_HEARTBEAT_CONFLICT', 409);
 }
 
-async function endLiveSession(userId, sessionId) {
+async function endLiveSession(userId, sessionId, now = new Date()) {
   let heartbeat = null;
   try {
-    heartbeat = await heartbeatLiveSession(userId, sessionId);
+    heartbeat = await heartbeatLiveSession(userId, sessionId, now);
   } catch (error) {
     if (error.code !== 'LIVE_SESSION_NOT_ACTIVE') throw error;
   }
-  const period = getUtcBillingPeriod();
+  const period = getUtcBillingPeriod(now);
   const result = await SubscriptionUsage.updateOne(
     { userId, periodStart: period.periodStart, 'activeLiveSessions.sessionId': sessionId },
     { $pull: { activeLiveSessions: { sessionId } } },

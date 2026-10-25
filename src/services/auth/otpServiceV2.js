@@ -1,7 +1,9 @@
 const bcrypt = require('bcryptjs');
+const { createHash, randomInt } = require('node:crypto');
 const OTPModel = require('../../models/OTP');
 const UserModel = require('../../models/User');
 const { sendOTPEmail } = require('../infrastructure/emailService');
+const { getRedisClient } = require('../infrastructure/redisService');
 
 // Constants
 const OTP_LENGTH = 6;
@@ -14,8 +16,7 @@ const MAX_OTP_REQUESTS_PER_HOUR = 5; // Max OTP creation requests per hour per i
  * Generate a random OTP code
  */
 function generateOTPCode(length = OTP_LENGTH) {
-  return String(Math.floor(Math.random() * Math.pow(10, length)))
-    .padStart(length, '0');
+  return String(randomInt(0, 10 ** length)).padStart(length, '0');
 }
 
 /**
@@ -52,6 +53,19 @@ async function checkOTPCreationRateLimit(identifier, type) {
     };
   }
 
+  const redisClient = await getRedisClient();
+  const identifierHash = createHash('sha256').update(`${type}:${identifier.toLowerCase()}`).digest('hex');
+  const redisCount = await redisClient.eval(
+    "local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('EXPIRE',KEYS[1],ARGV[1]); end; return n",
+    { keys: [`kiara:otp-rate:${identifierHash}`], arguments: ['3600'] },
+  );
+  if (Number(redisCount) > MAX_OTP_REQUESTS_PER_HOUR) {
+    return {
+      allowed: false,
+      reason: `Too many OTP requests. Maximum ${MAX_OTP_REQUESTS_PER_HOUR} OTPs per hour allowed. Please try again later.`,
+    };
+  }
+
   return { allowed: true };
 }
 
@@ -69,7 +83,7 @@ async function createAndSendOTP(identifier, type, options = {}) {
   // Rate limiting check
   const rateLimit = await checkOTPCreationRateLimit(normalizedIdentifier, type);
   if (!rateLimit.allowed) {
-    throw new Error(rateLimit.reason);
+    throw Object.assign(new Error(rateLimit.reason), { code: 'OTP_RATE_LIMITED' });
   }
 
   // Delete any existing unexpired OTP for this identifier+type
@@ -102,16 +116,20 @@ async function createAndSendOTP(identifier, type, options = {}) {
   // Send OTP via email/SMS
   try {
     if (type.includes('EMAIL')) {
-      await sendOTPEmail(normalizedIdentifier, code, options.meta?.userName || 'User');
+      await sendOTPEmail(
+        normalizedIdentifier,
+        code,
+        options.meta?.userName || 'User',
+        options.meta?.purpose,
+      );
     } else if (type.includes('MOBILE')) {
       // TODO: Send SMS
-      console.log(`[DEV] OTP for ${normalizedIdentifier}: ${code}`);
     }
   } catch (error) {
-    console.error('Failed to send OTP:', error);
+    console.error('[OTP_DELIVERY_FAILED]', error?.name || error?.code || 'EmailProviderError');
     // Delete the OTP record if sending fails
     await OTPModel.deleteOne({ _id: otpDoc._id });
-    throw new Error('Failed to send OTP. Please try again.');
+    throw Object.assign(new Error('Failed to send OTP. Please try again.'), { code: 'OTP_DELIVERY_FAILED' });
   }
 
   return {
@@ -128,79 +146,76 @@ async function createAndSendOTP(identifier, type, options = {}) {
  */
 async function verifyOTPCode(identifier, code, type) {
   const normalizedIdentifier = identifier.toLowerCase().trim();
+  if (!/^\d{6}$/.test(code)) {
+    return { success: false, message: 'Invalid or expired OTP.' };
+  }
 
-  // Find OTP record
+  const now = new Date();
   const otpDoc = await OTPModel.findOne({
     identifier: normalizedIdentifier,
     type,
+    used: false,
+    expiresAt: { $gt: now },
   });
 
-  // OTP not found
   if (!otpDoc) {
-    // Account enumeration protection: return generic message
-    return {
-      success: false,
-      message: 'Invalid or expired OTP.',
-    };
+    return { success: false, message: 'Invalid or expired OTP.' };
   }
 
-  // OTP expired
-  if (otpDoc.expiresAt < new Date()) {
-    return {
-      success: false,
-      message: 'OTP has expired. Please request a new one.',
-    };
+  if ((otpDoc.lockedUntil && otpDoc.lockedUntil > now) || otpDoc.failedAttempts >= otpDoc.maxAttempts) {
+    return { success: false, message: 'Invalid or expired OTP.' };
   }
 
-  // OTP already used
-  if (otpDoc.used) {
-    return {
-      success: false,
-      message: 'OTP has already been used.',
-    };
-  }
-
-  // Check if OTP is locked (too many failed attempts)
-  if (otpDoc.lockedUntil && otpDoc.lockedUntil > new Date()) {
-    const minutesLeft = Math.ceil((otpDoc.lockedUntil - new Date()) / 60000);
-    return {
-      success: false,
-      message: `Too many failed attempts. Please try again in ${minutesLeft} minutes.`,
-    };
-  }
-
-  // Verify OTP code
-  const codeMatch = await verifyHashedOTPCode(code, otpDoc.codeHash);
+  const codeMatch = otpDoc.codeHash
+    ? await verifyHashedOTPCode(code, otpDoc.codeHash)
+    : false;
   if (!codeMatch) {
-    // Increment failed attempts
-    otpDoc.failedAttempts += 1;
-
-    // Lock OTP if max attempts reached
-    if (otpDoc.failedAttempts >= otpDoc.maxAttempts) {
-      otpDoc.lockedUntil = new Date(Date.now() + OTP_ATTEMPT_LOCKOUT_MS);
-      await otpDoc.save();
-      return {
-        success: false,
-        message: `Too many failed attempts. OTP locked for 30 minutes.`,
-      };
-    }
-
-    await otpDoc.save();
-    return {
-      success: false,
-      message: 'Invalid OTP code.',
-    };
+    const attemptCount = { $add: [{ $ifNull: ['$failedAttempts', 0] }, 1] };
+    await OTPModel.findOneAndUpdate(
+      {
+        _id: otpDoc._id,
+        used: false,
+        expiresAt: { $gt: now },
+        failedAttempts: { $lt: otpDoc.maxAttempts },
+        $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
+      },
+      [{
+        $set: {
+          failedAttempts: attemptCount,
+          lockedUntil: {
+            $cond: [
+              { $gte: [attemptCount, otpDoc.maxAttempts] },
+              new Date(now.getTime() + OTP_ATTEMPT_LOCKOUT_MS),
+              '$lockedUntil',
+            ],
+          },
+          updatedAt: now,
+        },
+      }],
+      { returnDocument: 'after' },
+    );
+    return { success: false, message: 'Invalid or expired OTP.' };
   }
 
-  // OTP verified successfully
-  otpDoc.used = true;
-  otpDoc.usedAt = new Date();
-  await otpDoc.save();
+  const consumedOTP = await OTPModel.findOneAndUpdate(
+    {
+      _id: otpDoc._id,
+      used: false,
+      expiresAt: { $gt: now },
+      failedAttempts: { $lt: otpDoc.maxAttempts },
+      $or: [{ lockedUntil: null }, { lockedUntil: { $lte: now } }],
+    },
+    { $set: { used: true, usedAt: now } },
+    { returnDocument: 'after' },
+  );
+  if (!consumedOTP) {
+    return { success: false, message: 'Invalid or expired OTP.' };
+  }
 
   return {
     success: true,
     message: 'OTP verified successfully.',
-    otpDoc,
+    otpDoc: consumedOTP,
   };
 }
 

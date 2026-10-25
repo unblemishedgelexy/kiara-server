@@ -63,9 +63,14 @@ async function consolidateUser(userId, { limitEpisodes = 200 } = {}) {
         normalized[key] = existing;
         summary.mergedRelationships += 1;
         // mark old as archived in-place (don't delete)
-        try {
-          await WorkingMemoryRedis.upsertRelationship(userId, name, Object.assign({}, r, { archived: true }));
-        } catch {}
+        const archived = await WorkingMemoryRedis.upsertRelationship(
+          userId,
+          name,
+          Object.assign({}, r, { archived: true }),
+        );
+        if (!archived) {
+          console.warn('[MEMORY_RELATIONSHIP_ARCHIVE]', JSON.stringify({ status: 'FAILED' }));
+        }
       }
     }
 

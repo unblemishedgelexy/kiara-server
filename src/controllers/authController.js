@@ -59,7 +59,13 @@ async function createLocalDevelopmentSession(req, res) {
 // ============= REGISTRATION =============
 async function register(req, res, next) {
   try {
-    const { firstName, lastName, email, password, mobileNumber } = req.body;
+    const {
+      firstName,
+      lastName,
+      email,
+      password,
+      mobileNumber,
+    } = req.body;
     
     // Register user
     const result = await authService.registerUser({
@@ -68,17 +74,21 @@ async function register(req, res, next) {
       email,
       password,
       mobileNumber,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
     });
     
-    res.status(201).json({
+    res.status(202).json({
       success: true,
       message: result.message,
       user: result.user,
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
+      verificationRequired: true,
     });
   } catch (error) {
-    const statusCode = error.message.includes('already') ? 400 : 400;
+    const statusCode = error.code === 'OTP_RATE_LIMITED' ? 429
+      : error.code === 'OTP_DELIVERY_FAILED' || error.code === 'REDIS_UNAVAILABLE' ? 503
+        : error.message.includes('already') || error.message.includes('Only ') || error.message.includes('required') ? 400
+          : 503;
     return res.status(statusCode).json({
       success: false,
       message: error.message || 'Registration failed.',
@@ -96,14 +106,21 @@ async function sendOtp(req, res, next) {
     }
     
     // Send OTP
-    await authService.generateAndSendOTP(email, type);
+    await authService.generateAndSendOTP(email, type, {
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
     
     res.json({
       success: true,
       message: `OTP sent to ${email}. Valid for 10 minutes.`,
     });
   } catch (error) {
-    const statusCode = error.message.includes('allowed') ? 400 : 500;
+    const statusCode = error.code === 'OTP_RATE_LIMITED' ? 429
+      : error.code === 'OTP_DELIVERY_FAILED' || error.code === 'REDIS_UNAVAILABLE' ? 503
+        : error.message.includes('allowed') || error.message.includes('pending') || error.message.includes('Unsupported')
+          ? 400
+          : 503;
     return res.status(statusCode).json({
       success: false,
       message: error.message || 'Failed to send OTP.',
@@ -176,13 +193,9 @@ async function getGoogleAuthUrl(req, res, next) {
 
 async function handleGoogleCallback(req, res, next) {
   try {
-    const { code, state, error, error_description: errorDescription } = req.query;
-    console.log('[authController] 📍 Google callback received:', { hasCode: !!code, hasState: !!state, error });
-
+    const { code, state, error } = req.query;
     if (error) {
-      const message = typeof errorDescription === 'string' ? errorDescription : 'Google authentication was cancelled or denied.';
-      console.warn('[authController] ❌ Google OAuth error:', { error, message });
-      return res.status(400).json({ success: false, message });
+      return res.status(400).json({ success: false, message: 'Google authentication was cancelled or denied.' });
     }
 
     if (!code || !state) {
@@ -190,21 +203,13 @@ async function handleGoogleCallback(req, res, next) {
       return res.status(400).json({ success: false, message: 'Missing code or state in callback response.' });
     }
 
-    console.log('[authController] 🔑 Consuming auth state...');
     const authState = await googleOAuthService.consumeAuthState(String(state));
     if (!authState) {
       console.error('[authController] ❌ Auth state invalid or expired');
       return res.status(400).json({ success: false, message: 'Invalid or expired OAuth state.' });
     }
-    console.log('[authController] ✅ Auth state consumed, returnUrl:', authState.returnUrl);
-
-    console.log('[authController] 🔄 Exchanging code for tokens...');
     const tokenPayload = await googleOAuthService.exchangeCodeForTokens(String(code), authState.codeVerifier);
-    console.log('[authController] ✅ Code exchanged for tokens');
-    
-    console.log('[authController] 🔐 Verifying ID token...');
     const idTokenPayload = await googleOAuthService.verifyIdToken(tokenPayload.id_token);
-    console.log('[authController] ✅ ID token verified, user email:', idTokenPayload.email);
 
     const googleUser = {
       googleId: idTokenPayload.sub,
@@ -215,27 +220,37 @@ async function handleGoogleCallback(req, res, next) {
       googleEmail: idTokenPayload.email,
     };
 
-    console.log('[authController] 👤 Logging in with Google user:', { email: googleUser.email });
     const result = await authService.loginWithGoogle(googleUser);
-    console.log('[authController] ✅ User logged in, creating auth ticket...');
     
     const authTicket = await googleOAuthService.createAuthTicket(
       result.user._id || result.user.id,
       result.accessToken,
       result.refreshToken
     );
-    console.log('[authController] 🎫 Auth ticket created');
-
     const redirectUrl = new URL(authState.returnUrl);
     redirectUrl.searchParams.set('auth_ticket', authTicket);
     redirectUrl.searchParams.set('status', 'success');
 
-    console.log('[authController] 🔀 Redirecting to:', redirectUrl.toString().split('?')[0] + '?...');
     return res.redirect(303, redirectUrl.toString());
   } catch (error) {
-    console.error('[authController] ❌ Google callback error:', error instanceof Error ? error.message : error);
-    console.error('[authController] Error stack:', error instanceof Error ? error.stack : '');
-    return res.status(500).json({ success: false, message: error.message || 'Google callback failed.' });
+    console.error('[authController] Google callback failed:', error?.name || 'OAuthCallbackError', error?.code || 'UNKNOWN');
+    return res.status(500).json({ success: false, message: 'Google authentication failed.' });
+  }
+}
+
+async function acceptLegalConsent(req, res) {
+  try {
+    const user = await authService.acceptLegalConsent(req.userId);
+    return res.json({
+      success: true,
+      data: { user },
+    });
+  } catch (error) {
+    const notFound = error?.code === 'USER_NOT_FOUND';
+    return res.status(notFound ? 404 : 500).json({
+      success: false,
+      message: notFound ? 'User not found.' : 'Unable to save legal consent.',
+    });
   }
 }
 
@@ -306,13 +321,7 @@ async function refreshToken(req, res, next) {
         ? 401
         : 400;
 
-    console.error('[AUTH_REFRESH_FAILED]', JSON.stringify({
-      requestId: req?.requestId || null,
-      message,
-      statusCode,
-      userAgent: req.headers['user-agent'],
-      clientIp: req.ip || req.connection?.remoteAddress || null,
-    }));
+    console.error('[AUTH_REFRESH_FAILED]', err?.name || 'TokenRefreshError', statusCode);
 
     return res.status(statusCode).json({
       success: false,
@@ -333,10 +342,9 @@ async function logout(req, res, next) {
     if (refreshToken) {
       try {
         const decoded = verifyRefreshToken(refreshToken);
-        console.log(`[authController] logout request for user ${decoded.sub}`);
         await authService.logout(decoded.sub, refreshToken);
       } catch (error) {
-        console.warn('[authController] logout failed to verify refresh token:', error.message || error);
+        console.warn('[authController] logout token rejected:', error?.name || 'TokenVerificationError');
       }
     }
 
@@ -356,7 +364,10 @@ async function sendForgotPasswordOtp(req, res, next) {
     }
     
     // Send OTP
-    await authService.sendForgotPasswordOTP(email);
+    await authService.sendForgotPasswordOTP(email, {
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
     
     res.json({
       success: true,
@@ -371,35 +382,12 @@ async function sendForgotPasswordOtp(req, res, next) {
   }
 }
 
-async function verifyForgotPasswordOtp(req, res, next) {
-  try {
-    const { email, code } = req.body;
-    
-    if (!email || !code) {
-      return res.status(400).json({ success: false, message: 'Email and OTP code are required.' });
-    }
-    
-    // Verify OTP
-    await authService.verifyForgotPasswordOTP(email, code);
-    
-    res.json({
-      success: true,
-      message: 'OTP verified. You can now reset your password.',
-    });
-  } catch (error) {
-    return res.status(400).json({
-      success: false,
-      message: error.message || 'OTP verification failed.',
-    });
-  }
-}
-
 async function resetPasswordHandler(req, res, next) {
   try {
-    const { email, newPassword, confirmPassword } = req.body;
+    const { email, code, newPassword, confirmPassword } = req.body;
     
-    if (!email || !newPassword || !confirmPassword) {
-      return res.status(400).json({ success: false, message: 'Email, password, and confirmation are required.' });
+    if (!email || !code || !newPassword || !confirmPassword) {
+      return res.status(400).json({ success: false, message: 'Email, OTP, password, and confirmation are required.' });
     }
     
     if (newPassword !== confirmPassword) {
@@ -411,14 +399,14 @@ async function resetPasswordHandler(req, res, next) {
     }
     
     // Reset password
-    await authService.resetPassword(email, newPassword);
+    await authService.resetPasswordWithOtp(email, code, newPassword);
     
     res.json({
       success: true,
       message: 'Password reset successfully. You can now login with your new password.',
     });
   } catch (error) {
-    return res.status(400).json({
+    return res.status(error.message.includes('Invalid or expired OTP') ? 400 : 503).json({
       success: false,
       message: error.message || 'Password reset failed.',
     });
@@ -428,6 +416,7 @@ async function resetPasswordHandler(req, res, next) {
 module.exports = { 
   createLocalDevelopmentSession,
   register, 
+  acceptLegalConsent,
   sendOtp, 
   verifyOtp, 
   login, 
@@ -437,6 +426,5 @@ module.exports = {
   refreshToken, 
   logout, 
   sendForgotPasswordOtp, 
-  verifyForgotPasswordOtp, 
   resetPasswordHandler, 
 };

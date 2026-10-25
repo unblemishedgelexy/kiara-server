@@ -1,25 +1,32 @@
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
+const redisAbuseProtection = require('../middleware/redisAbuseProtection');
 const {
   streamElevenLabsSpeech,
 } = require('../services/live/elevenLabsService');
 
 const router = express.Router();
 
-router.post('/preview', authMiddleware, async (req, res) => {
+router.post('/preview', authMiddleware, redisAbuseProtection({ scope: 'account-ip', bucket: 'expensive' }), async (req, res) => {
   const text = String(
     req.body?.text || ''
   ).trim();
 
-  if (!text) {
+  if (!text || text.length > 1200) {
     res.status(400).json({
-      error: 'Text is required.',
+      error: text ? 'Text is too long for realtime TTS.' : 'Text is required.',
     });
     return;
   }
 
+  const upstreamController = new AbortController();
+  const upstreamTimeout = setTimeout(() => upstreamController.abort(), 30000);
+  const abortIfClientClosed = () => {
+    if (!res.writableEnded) upstreamController.abort();
+  };
+  res.once('close', abortIfClientClosed);
   try {
-    const response = await streamElevenLabsSpeech(text);
+    const response = await streamElevenLabsSpeech(text, { signal: upstreamController.signal });
 
     if (!response) {
       res.status(204).end();
@@ -27,7 +34,8 @@ router.post('/preview', authMiddleware, async (req, res) => {
     }
 
     if (!response.ok) {
-      res.status(response.status || 502).end();
+      await response.body?.cancel().catch(() => {});
+      res.status(502).json({ success: false, message: 'Speech service is temporarily unavailable.' });
       return;
     }
 
@@ -52,10 +60,14 @@ router.post('/preview', authMiddleware, async (req, res) => {
     }
 
     res.end();
-  } catch {
+  } catch (error) {
+    console.error('[TTS_PREVIEW_FAILED]', error?.name || error?.code || 'ProviderError');
     if (!res.headersSent) {
       res.status(502).end();
     }
+  } finally {
+    clearTimeout(upstreamTimeout);
+    res.removeListener('close', abortIfClientClosed);
   }
 });
 

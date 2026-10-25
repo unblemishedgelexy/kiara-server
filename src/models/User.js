@@ -10,6 +10,7 @@ const userSchema = new mongoose.Schema(
     // Email and authentication
     email: { type: String, lowercase: true, sparse: true, trim: true, unique: true, required: true },
     passwordHash: { type: String, required: true },
+    passwordLoginEnabled: { type: Boolean },
     
     // Email verification
     emailVerified: { type: Boolean, default: false },
@@ -24,11 +25,18 @@ const userSchema = new mongoose.Schema(
     
     // Profile
     profilePicture: { type: String },
+    profilePictureFileId: { type: String },
     
     // Role and status
     role: { type: String, enum: ['user', 'admin'], default: 'user' },
     mode: { type: String, enum: ['registered', 'guest'], default: 'registered' },
     isActive: { type: Boolean, default: true },
+
+    // Legal versions are recorded with the server-side acceptance timestamp.
+    termsVersion: { type: String },
+    termsAcceptedAt: { type: Date },
+    privacyVersion: { type: String },
+    privacyAcceptedAt: { type: Date },
     
     // Token management
     refreshTokenHash: { type: String },

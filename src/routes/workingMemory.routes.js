@@ -11,11 +11,14 @@ const WorkingMemoryController = require('../controllers/workingMemory/workingMem
 const WorkingMemoryMiddleware = require('../middleware/workingMemory/workingMemory.middleware');
 const authMiddleware = require('../middleware/authMiddleware');
 const { env } = require('../config/env');
+const redisAbuseProtection = require('../middleware/redisAbuseProtection');
 
-const memoryDisabledResponse = (res) => res.status(200).json({
-  success: true,
+const memoryDisabledResponse = (res) => res.status(503).json({
+  success: false,
   skipped: true,
   reason: 'memory_disabled_for_live_stability',
+  code: 'MEMORY_DISABLED',
+  message: 'Working memory is currently unavailable.',
   enabled: false,
   timestamp: new Date().toISOString(),
 });
@@ -43,6 +46,7 @@ router.use(WorkingMemoryMiddleware.logRequests);
 router.get('/health', WorkingMemoryController.getHealth);
 
 router.use(authMiddleware);
+router.use(redisAbuseProtection({ scope: 'account-ip', bucket: 'expensive' }));
 router.use(WorkingMemoryMiddleware.bindAuthenticatedUser);
 
 /**

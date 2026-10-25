@@ -101,13 +101,13 @@ function sanitizeUser(user) {
   return {
     id: user._id,
     email: user.email,
+    emailVerified: Boolean(user.emailVerified),
+    sensitiveActionRequiresPassword: user.passwordLoginEnabled === true
+      || (!user.googleId && user.passwordLoginEnabled !== false),
     firstName: user.firstName,
     lastName: user.lastName,
     displayName: user.displayName,
     profilePicture: user.profilePicture,
-    isVerified: user.isVerified,
-    verifiedAt: user.verifiedAt,
-    verificationMethod: user.verificationMethod,
     role: user.role,
     mode: user.mode,
     createdAt: user.createdAt,
@@ -124,7 +124,6 @@ function sanitizeUser(user) {
 async function registerUser({ firstName, lastName, email, password, mobileNumber }) {
   // Validate input
 
-  console.log('Registering user:', { firstName, lastName, email, mobileNumber });
   if (!firstName || !lastName) {
     throw new Error('First name and last name are required.');
   }
@@ -159,7 +158,6 @@ async function registerUser({ firstName, lastName, email, password, mobileNumber
   // Hash password
   const passwordHash = await hashPassword(password);
 
-  console.log('Creating user with email:', firstName, lastName, normalizedEmail, mobileNumber);
  try {
   // Create user with isVerified = false
   const user = await UserModel.create({
@@ -168,6 +166,7 @@ async function registerUser({ firstName, lastName, email, password, mobileNumber
     displayName: `${firstName.trim()} ${lastName.trim()}`,
     email: normalizedEmail,
     passwordHash,
+    passwordLoginEnabled: true,
     mobileNumber: mobileNumber ? mobileNumber.trim() : undefined,
     isVerified: false,      // NEW: Not verified initially
     verifiedAt: null,       // NEW: Will be set on first OTP verification
@@ -194,7 +193,7 @@ async function registerUser({ firstName, lastName, email, password, mobileNumber
     refreshToken,
   };
   } catch (error) {
-    console.error('Error during user creation:', error.message);
+    console.error('[AUTH_V2_USER_CREATE_FAILED]', error?.name || error?.code || 'DatabaseError');
     throw new Error('Failed to create user. Please try again.');
   }
 }
@@ -225,6 +224,10 @@ async function loginWithEmailPassword(email, password, ipAddress = null) {
     throw new Error('Invalid email or password.');
   }
 
+  if (!user.emailVerified) {
+    throw new Error('Please verify your email before logging in.');
+  }
+
   // Check if account is active
   if (!user.isActive) {
     throw new Error('Account is inactive. Please contact support.');
@@ -245,7 +248,7 @@ async function loginWithEmailPassword(email, password, ipAddress = null) {
     // Lock account after 5 failed attempts
     if (user.failedLoginAttempts >= 5) {
       user.loginLockedUntil = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
-      console.warn(`Account ${normalizedEmail} locked after 5 failed login attempts`);
+      console.warn('[AUTH_LOGIN_LOCKED]', 'failed_attempt_threshold_reached');
     }
 
     await user.save();
@@ -312,7 +315,7 @@ async function requestPasswordResetOTP(email, ipAddress = null) {
       expiresIn: result.expiresIn,
     };
   } catch (error) {
-    console.error('Failed to create/send OTP:', error.message);
+    console.error('[AUTH_V2_RESET_OTP_FAILED]', error?.name || error?.code || 'OtpError');
     // Return generic message to protect account enumeration
     return {
       success: true,
@@ -364,9 +367,8 @@ async function verifyOTPAndResetPassword(email, otpCode, newPassword) {
 
   // Update user password and AUTO-VERIFY
   user.passwordHash = passwordHash;
-  user.isVerified = true;                    // AUTO-VERIFY
-  user.verifiedAt = new Date();              // Set verification timestamp
-  user.verificationMethod = 'password_reset_otp'; // Track how verified
+  user.passwordLoginEnabled = true;
+  user.emailVerified = true;
   user.refreshTokenHash = null;              // Force re-login
   user.failedLoginAttempts = 0;              // Reset login attempts
   user.loginLockedUntil = null;              // Clear any lock
@@ -375,8 +377,6 @@ async function verifyOTPAndResetPassword(email, otpCode, newPassword) {
 
   // Invalidate all existing sessions (force re-login)
   await SessionModel.deleteMany({ userId: user._id });
-
-  console.info(`User ${normalizedEmail} verified via password reset OTP`);
 
   return {
     success: true,
@@ -460,7 +460,7 @@ async function requestEmailVerificationOTP(userId, email, ipAddress = null) {
   }
 
   // Check if email is already verified
-  if (user.isVerified) {
+  if (user.emailVerified) {
     throw new Error('Your email is already verified.');
   }
 
@@ -483,7 +483,7 @@ async function requestEmailVerificationOTP(userId, email, ipAddress = null) {
       expiresIn: result.expiresIn,
     };
   } catch (error) {
-    console.error('Failed to send verification OTP:', error.message);
+    console.error('[PROFILE_EMAIL_OTP_FAILED]', error?.name || error?.code || 'OtpError');
     throw new Error('Failed to send OTP. Please try again.');
   }
 }
@@ -509,7 +509,7 @@ async function verifyEmailOTPFromProfile(userId, email, otpCode) {
   }
 
   // Check if already verified
-  if (user.isVerified) {
+  if (user.emailVerified) {
     throw new Error('Your email is already verified.');
   }
 
@@ -530,12 +530,8 @@ async function verifyEmailOTPFromProfile(userId, email, otpCode) {
   }
 
   // Update user - AUTO-VERIFY
-  user.isVerified = true;
-  user.verifiedAt = new Date();
-  user.verificationMethod = 'email_verification_otp';
+  user.emailVerified = true;
   await user.save();
-
-  console.info(`User ${userId} verified email via profile verification OTP`);
 
   return {
     success: true,

@@ -10,15 +10,13 @@ async function createPasswordResetToken(userId, expiresInSeconds = 600) {
   return rawToken;
 }
 
-async function verifyPasswordResetToken(rawToken) {
+async function consumePasswordResetToken(rawToken) {
   const tokenHash = hashToken(rawToken);
-  const token = await PasswordResetToken.findOne({ tokenHash, used: false, expiresAt: { $gt: new Date() } });
-  return token || null;
+  return PasswordResetToken.findOneAndUpdate(
+    { tokenHash, used: false, expiresAt: { $gt: new Date() } },
+    { $set: { used: true, usedAt: new Date() } },
+    { returnDocument: 'after' },
+  );
 }
 
-async function consumePasswordResetToken(tokenDoc) {
-  tokenDoc.used = true;
-  await tokenDoc.save();
-}
-
-module.exports = { createPasswordResetToken, verifyPasswordResetToken, consumePasswordResetToken };
+module.exports = { createPasswordResetToken, consumePasswordResetToken };

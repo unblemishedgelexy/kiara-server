@@ -29,7 +29,7 @@ function flattenInput(input = {}) {
   return { userMessage, assistantMessage, combined };
 }
 
-async function extract(input = {}) {
+async function extract(input = {}, { analyzeConversationFn = analyzeConversation } = {}) {
   const { userMessage, assistantMessage, combined } = flattenInput(input);
   const context = {
     userId: input.userId,
@@ -47,6 +47,7 @@ async function extract(input = {}) {
       decision: 'NO_MEMORY',
       candidates: [],
       reason: 'Missing userId',
+      reasonCode: 'MISSING_USER_ID',
     };
   }
 
@@ -57,10 +58,19 @@ async function extract(input = {}) {
       decision: 'NO_MEMORY',
       candidates: [],
       reason: 'No durable user-owned memory signal detected.',
+      reasonCode: 'INPUT_SCREEN_NO_MEMORY',
+      diagnostics: {
+        stage: 'input_screen',
+        providerOperation: 'groq_memory_analysis',
+        inputPresent: Boolean(userMessage || assistantMessage),
+        responseContentPresent: false,
+        parsingSucceeded: false,
+        validationSucceeded: false,
+      },
     };
   }
 
-  const analysis = await analyzeConversation(context);
+  const analysis = await analyzeConversationFn(context);
   if (analysis?.failureCategory) {
     return {
       ok: false,
@@ -69,19 +79,47 @@ async function extract(input = {}) {
       failureCategory: analysis.failureCategory,
       failureCode: analysis.failureCode || 'MEMORY_EXTRACTION_FAILURE',
       reason: analysis.reason || 'Memory extraction failed.',
+      diagnostics: analysis.diagnostics,
     };
   }
 
-  if (!analysis || analysis.decision === 'NO_MEMORY' || !Array.isArray(analysis.candidates) || analysis.candidates.length === 0) {
+  if (!analysis) {
+    return {
+      ok: false,
+      decision: 'ERROR',
+      candidates: [],
+      failureCategory: 'INVALID_OUTPUT',
+      failureCode: 'EMPTY_ANALYSIS_RESULT',
+      reason: 'Memory analysis returned no result.',
+    };
+  }
+
+  if (analysis.decision === 'NO_MEMORY'
+    && Array.isArray(analysis.candidates)
+    && analysis.candidates.length === 0) {
     return {
       ok: false,
       decision: 'NO_MEMORY',
       candidates: [],
       reason: analysis && analysis.reason ? analysis.reason : 'No valid memory candidates found.',
+      reasonCode: 'PROVIDER_NO_MEMORY',
+      diagnostics: analysis.diagnostics,
+    };
+  }
+
+  if (!Array.isArray(analysis.candidates) || analysis.candidates.length === 0) {
+    return {
+      ok: false,
+      decision: 'ERROR',
+      candidates: [],
+      failureCategory: 'INVALID_OUTPUT',
+      failureCode: 'INVALID_CANDIDATE_RESULT',
+      reason: 'Memory analysis did not return candidate results.',
     };
   }
 
   const accepted = [];
+  let ignoredCandidate = false;
   for (const candidate of analysis.candidates) {
     const decision = candidate && candidate.decision ? String(candidate.decision).trim().toUpperCase() : 'NO_MEMORY';
     if (decision === 'ERROR') {
@@ -94,7 +132,11 @@ async function extract(input = {}) {
         reason: candidate.reason || 'The memory extractor returned an error decision.',
       };
     }
-    if (decision === 'NO_MEMORY' || decision === 'IGNORE') {
+    if (decision === 'NO_MEMORY') {
+      continue;
+    }
+    if (decision === 'IGNORE') {
+      ignoredCandidate = true;
       continue;
     }
 
@@ -141,10 +183,8 @@ async function extract(input = {}) {
     } catch {
       return {
         ok: false,
-        decision: 'ERROR',
+        decision: 'CANDIDATES_REJECTED',
         candidates: [],
-        failureCategory: 'INVALID_OUTPUT',
-        failureCode: 'INVALID_MEMORY_CANDIDATE',
         reason: 'The extracted memory candidate failed canonical validation.',
       };
     }
@@ -153,9 +193,13 @@ async function extract(input = {}) {
   if (accepted.length === 0) {
     return {
       ok: false,
-      decision: 'NO_MEMORY',
+      decision: ignoredCandidate ? 'NO_OP' : 'NO_MEMORY',
       candidates: [],
-      reason: 'All extracted candidates failed canonical validation.',
+      reason: ignoredCandidate
+        ? 'The extractor intentionally ignored all candidates.'
+        : 'The extractor decided there was no memory to save.',
+      reasonCode: ignoredCandidate ? 'ALL_CANDIDATES_IGNORED' : 'ALL_CANDIDATES_NO_MEMORY',
+      diagnostics: analysis.diagnostics,
     };
   }
 
@@ -164,6 +208,7 @@ async function extract(input = {}) {
     decision: 'MEMORY',
     candidates: accepted,
     reason: 'Canonical memory candidates extracted successfully.',
+    diagnostics: analysis.diagnostics,
   };
 }
 

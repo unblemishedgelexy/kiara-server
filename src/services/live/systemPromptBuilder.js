@@ -12,6 +12,32 @@
 const crypto = require('node:crypto');
 const MemoryService = require('../memory');
 
+function buildTemporalContext(activeContext) {
+  const timeZone = typeof activeContext?.localTimeZone === 'string'
+    ? activeContext.localTimeZone
+    : '';
+
+  if (!timeZone) return '';
+
+  let currentTime;
+  try {
+    currentTime = new Intl.DateTimeFormat('en-US', {
+      dateStyle: 'full',
+      timeStyle: 'short',
+      timeZone,
+    }).format(new Date());
+  } catch {
+    return '';
+  }
+
+  const lines = [
+    `User's current local date and time: ${currentTime} (${timeZone}).`,
+    'Use this as the time reference when the user asks about the time or when time is relevant; do not announce it unnecessarily.',
+  ];
+
+  return `\n\nTime and conversation continuity:\n- ${lines.join('\n- ')}`;
+}
+
 module.exports = {
 
   /**
@@ -30,8 +56,6 @@ module.exports = {
     const sessionId = options.sessionId || userId || 'session';
     const activeContext = options.activeContext || {};
     const traceId = String(options.traceId || 'untraced');
-    const startedAt = Date.now();
-
     // Guard: only build when explicitly triggered
     if (!trigger) {
       return { systemPrompt: '' };
@@ -42,7 +66,6 @@ module.exports = {
     }
 
     try {
-      const retrievalStartedAt = Date.now();
       const result = await MemoryService.prepareContext(userId, {
         charLimit,
         userQuery,
@@ -50,16 +73,12 @@ module.exports = {
         activeContext,
         traceId,
       });
-      const retrievalElapsedMs = Date.now() - retrievalStartedAt;
-      if (result?.ok === false && !result.systemPrompt) {
-        const error = new Error('Memory retrieval failed while building the Live prompt.');
-        error.code = result.errorCode || 'MEMORY_RETRIEVAL_FAILURE';
-        throw error;
-      }
       const RESPONSE_GUIDELINES = `
 Response Guidelines (for Kiara's replies):
 - Speak like a natural human friend; never reply like an assistant.
 - Continue the current conversation naturally; do not restart or change topic abruptly.
+- Do not greet or welcome the user back just because a session started. Respond directly to what they say; only acknowledge time apart if the user brings it up.
+- Never claim that it has been a long time or that you missed the user based only on a session restart.
 - Understand the user's intent from the current message and recent conversation context before deciding how to respond.
 - Kiara has one continuous conversation; never ask the user to select or activate a mode.
 - Never require a wake word such as "Kiara" before responding.
@@ -84,38 +103,17 @@ Response Guidelines (for Kiara's replies):
 - If the authenticated user's fullName is unavailable, never guess or invent it.
 `;
 
-      const promptParts = [String(result.systemPrompt || '').trim(), RESPONSE_GUIDELINES].filter(Boolean);
+      const temporalContext = buildTemporalContext(activeContext);
+      const promptParts = [
+        String(result.systemPrompt || '').trim(),
+        temporalContext,
+        RESPONSE_GUIDELINES,
+      ].filter(Boolean);
       const augmented = promptParts.join('\n\n');
-      const memoryContextIncluded = Array.isArray(result.facts)
-        && result.facts.length > 0
-        && Boolean(String(result.systemPrompt || '').trim());
+      const memoryContextIncluded = result.memoryContextIncluded === true;
       const memoryContextHash = result.systemPrompt
         ? crypto.createHash('sha256').update(String(result.systemPrompt)).digest('hex').slice(0, 16)
         : null;
-      const retrievalMetadata = result.retrievalMetadata || {};
-      console.info('[LIVE_PROMPT_STAGE]', JSON.stringify({
-        traceId,
-        stage: 'system_prompt_assembled',
-        status: result.ok === false ? 'partial' : 'success',
-        elapsedMs: Date.now() - startedAt,
-        retrievalElapsedMs,
-        identityLookupMs: Number(result.identityLookupMs) || 0,
-        identityStatus: result.identityStatus || 'UNKNOWN',
-        errorCode: result.ok === false ? (result.errorCode || 'MEMORY_RETRIEVAL_FAILURE') : null,
-        queryLength: String(userQuery).length,
-        memoryStatus: result.memoryStatus || (result.facts?.length ? 'MEMORY_FOUND' : 'NO_MEMORY'),
-        memoryCount: Array.isArray(result.facts) ? result.facts.length : 0,
-        memoryContextIncluded,
-        memoryContextHash,
-        retrievalStatus: retrievalMetadata.status || result.memoryStatus || null,
-        routing: retrievalMetadata.routing || null,
-        plannerStatus: retrievalMetadata.plannerStatus || 'NOT_REPORTED',
-        plannerSources: Array.isArray(retrievalMetadata.plannedSources) ? retrievalMetadata.plannedSources : [],
-        sourcesAttempted: Array.isArray(retrievalMetadata.sourcesAttempted) ? retrievalMetadata.sourcesAttempted : [],
-        fallbackPasses: Number(retrievalMetadata.fallbackPasses) || 0,
-        promptLength: augmented.length,
-        retrievalLatency: result.retrievalMetadata?.latency || null,
-      }));
       return {
         systemPrompt: augmented,
         memoryRevision: result.memoryRevision || 0,
@@ -125,18 +123,12 @@ Response Guidelines (for Kiara's replies):
         memoryContextIncluded,
         memoryContextHash,
         identityStatus: result.identityStatus || 'UNKNOWN',
-        errorCode: result.ok === false ? (result.errorCode || 'MEMORY_RETRIEVAL_FAILURE') : null,
+        errorCode: result.ok === false || result.memoryStatus === 'PARTIAL'
+          ? (result.errorCode || 'MEMORY_RETRIEVAL_FAILURE')
+          : null,
       };
 
     } catch (error) {
-      console.warn('[LIVE_PROMPT_STAGE]', JSON.stringify({
-        traceId,
-        stage: 'system_prompt_assembled',
-        status: 'failure',
-        elapsedMs: Date.now() - startedAt,
-        queryLength: String(userQuery).length,
-        errorCode: error?.code || error?.name || 'PROMPT_BUILD_FAILURE',
-      }));
       throw error;
     }
   },

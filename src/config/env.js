@@ -2,8 +2,8 @@ const path = require('path');
 const dotenv = require('dotenv');
 
 const configRoot = path.resolve(__dirname, '../../');
-dotenv.config({ path: path.resolve(configRoot, '.env.local') });
-dotenv.config({ path: path.resolve(configRoot, '.env') });
+dotenv.config({ path: path.resolve(configRoot, '.env.local'), quiet: true });
+dotenv.config({ path: path.resolve(configRoot, '.env'), quiet: true });
 
 function stripQuotes(value) {
   if (typeof value !== 'string') return value;
@@ -22,10 +22,23 @@ function readNumber(name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function readPositiveNumber(name, fallback) {
+  const value = readNumber(name, fallback);
+  return value > 0 ? value : fallback;
+}
+
 function readList(name, fallback) {
   const rawValue = stripQuotes((process.env[name] || '').trim());
   if (!rawValue) return fallback;
   return rawValue.split(',').map((v) => stripQuotes(v.trim().replace(/\/$/, ''))).filter(Boolean);
+}
+
+function readTrustProxy() {
+  const value = readEnv('TRUST_PROXY', nodeEnv === 'production' ? '1' : 'false').toLowerCase();
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (/^\d+$/.test(value)) return Number(value);
+  return value;
 }
 
 function mergeLists(...lists) {
@@ -57,6 +70,7 @@ const env = {
   elevenLabsVoiceId: readEnv('ELEVENLABS_VOICE_ID'),
   geminiApiKey: readEnv('GEMINI_API_KEY'),
   groqApiKey: readEnv('GROQ_API_KEY'),
+  groqTextFallbackEnabled: readEnv('GROQ_TEXT_FALLBACK_ENABLED', 'false').toLowerCase() === 'true',
   geminiLiveModel: readEnv('GEMINI_LIVE_MODEL', ''),
   geminiLiveVoice: readEnv('GEMINI_LIVE_VOICE', ''),
   geminiEmbeddingModel: readEnv('GEMINI_EMBEDDING_MODEL', ''),
@@ -64,9 +78,15 @@ const env = {
   jwtAccessSecret: readEnv('JWT_ACCESS_SECRET', ''),
   jwtRefreshSecret: readEnv('JWT_REFRESH_SECRET', ''),
   serverUrl: readEnv('SERVER_URL', 'http://localhost:4000'),
-  emailFrom: readEnv('EMAIL_FROM', 'no-reply@example.com'),
-  emailUser: readEnv('EMAIL_USER', ''),
-  emailPass: readEnv('EMAIL_PASS', ''),
+  emailProvider: readEnv('EMAIL_PROVIDER', nodeEnv === 'production' ? 'ses' : 'discard').toLowerCase(),
+  emailFrom: readEnv('EMAIL_FROM', ''),
+  emailUser: readEnv('SMTP_USER', readEnv('EMAIL_USER', '')),
+  emailPass: readEnv('SMTP_PASS', readEnv('EMAIL_PASS', '')),
+  smtpHost: readEnv('SMTP_HOST', 'smtp.gmail.com'),
+  smtpPort: readNumber('SMTP_PORT', 587),
+  smtpSecure: readEnv('SMTP_SECURE', 'false').toLowerCase() === 'true',
+  awsRegion: readEnv('AWS_REGION', ''),
+  awsSesFromEmail: readEnv('AWS_SES_FROM_EMAIL', ''),
   smsTransportUrl: readEnv('SMS_TRANSPORT_URL', ''),
   twilioAccountSid: readEnv('TWILIO_ACCOUNT_SID', ''),
   twilioAuthToken: readEnv('TWILIO_AUTH_TOKEN', ''),
@@ -88,6 +108,19 @@ const env = {
   localDevAuthEnabled: nodeEnv === 'development' && readEnv('LOCAL_DEV_AUTH_ENABLED', 'false').toLowerCase() === 'true',
   localDevSubscriptionBypass: nodeEnv === 'development' && readEnv('LOCAL_DEV_SUBSCRIPTION_BYPASS', 'false').toLowerCase() === 'true',
   port: readNumber('PORT', 4000),
+  trustProxy: readTrustProxy(),
+  abuseMaxInFlightPerIp: readPositiveNumber('ABUSE_MAX_IN_FLIGHT_PER_IP', 20),
+  abuseMaxInFlightPerAccount: readPositiveNumber('ABUSE_MAX_IN_FLIGHT_PER_ACCOUNT', 10),
+  abuseBurstMax: readPositiveNumber('ABUSE_BURST_MAX', 120),
+  abuseBurstWindowSeconds: readPositiveNumber('ABUSE_BURST_WINDOW_SECONDS', 10),
+  abuseBlockSeconds: readPositiveNumber('ABUSE_BLOCK_SECONDS', 30),
+  abuseLeaseSeconds: readPositiveNumber('ABUSE_LEASE_SECONDS', 120),
+  authAbuseMaxInFlightPerIp: readPositiveNumber('AUTH_ABUSE_MAX_IN_FLIGHT_PER_IP', 20),
+  authAbuseBurstMax: readPositiveNumber('AUTH_ABUSE_BURST_MAX', 120),
+  authAbuseBurstWindowSeconds: readPositiveNumber('AUTH_ABUSE_BURST_WINDOW_SECONDS', 10),
+  authAbuseBlockSeconds: readPositiveNumber('AUTH_ABUSE_BLOCK_SECONDS', 30),
+  authAbuseLeaseSeconds: readPositiveNumber('AUTH_ABUSE_LEASE_SECONDS', 120),
+  maxActiveLiveSessionsPerAccount: readPositiveNumber('MAX_ACTIVE_LIVE_SESSIONS_PER_ACCOUNT', 2),
   // Redis Configuration for Short-term Memory
   redisHost: readEnv('REDIS_HOST', 'localhost'),
   redisPort: readNumber('REDIS_PORT', 6379),
@@ -95,13 +128,16 @@ const env = {
   redisUrl: readEnv('REDIS_URL', ''),
   redisPassword: readEnv('REDIS_PASSWORD', ''),
   liveMemoryEnabled: readEnv('LIVE_MEMORY_ENABLED', 'true').toLowerCase() === 'true',
+  memoryRetrievalSourceTimeoutMs: readPositiveNumber('MEMORY_RETRIEVAL_SOURCE_TIMEOUT_MS', 10000),
+  memoryRetrievalTimeoutMs: readPositiveNumber('MEMORY_RETRIEVAL_TIMEOUT_MS', 10000),
+  liveMemoryRetrievalTimeoutMs: readPositiveNumber('LIVE_MEMORY_RETRIEVAL_TIMEOUT_MS', 5000),
+  memoryMongoQueryTimeoutMs: readPositiveNumber('MEMORY_MONGO_QUERY_TIMEOUT_MS', 3000),
   memoryGroqQueryPlannerEnabled: nodeEnv === 'development' && !isNodeTest
     && readEnv('MEMORY_GROQ_QUERY_PLANNER_ENABLED', 'false').toLowerCase() === 'true',
   enablePinecone: readEnv('ENABLE_PINECONE', 'true').toLowerCase() === 'true',
   enableQueue: readEnv('ENABLE_QUEUE', 'true').toLowerCase() === 'true',
   certificationMode: readEnv('CERTIFICATION_MODE', 'false').toLowerCase() === 'true',
   enablePromotionWorker: readEnv('ENABLE_PROMOTION_WORKER', 'true').toLowerCase() === 'true',
-  promotionWorkerIntervalMs: readNumber('PROMOTION_WORKER_INTERVAL_MS', 30000),
   promotionWorkerLimit: readNumber('PROMOTION_WORKER_LIMIT', 20),
   enableProfileCache: readEnv('ENABLE_PROFILE_CACHE', 'true').toLowerCase() === 'true',
   enableUnfinishedContext: readEnv('ENABLE_UNFINISHED_CONTEXT', 'true').toLowerCase() === 'true',
@@ -142,12 +178,55 @@ const env = {
   subscriptionPremiumPriceInr: readNumber('SUBSCRIPTION_PREMIUM_PRICE_INR', 399),
   subscriptionPremiumLiveMinutes: readNumber('SUBSCRIPTION_PREMIUM_LIVE_MINUTES', 400),
   subscriptionPremiumChatMessages: readNumber('SUBSCRIPTION_PREMIUM_CHAT_MESSAGES', 2500),
-  // Silence non-error console output when true
-  silenceConsole: readEnv('SILENCE_CONSOLE', 'true').toLowerCase() === 'true',
 };
 
 function isProductionEnv() {
   return env.nodeEnv === 'production';
+}
+
+function validateProductionConfig() {
+  if (!isProductionEnv()) return;
+
+  const isPlaceholder = (value) => !value || /<[^>]+>|change[-_ ]?me|replace[-_ ]?me/i.test(value);
+  const requiredValues = [
+    ['MONGODB_URI', env.mongoUri, 'mongodb://127.0.0.1:27017/kiara_ai'],
+    ['JWT_ACCESS_SECRET', env.jwtAccessSecret, ''],
+    ['JWT_REFRESH_SECRET', env.jwtRefreshSecret, ''],
+    ['AES_SECRET', env.aesSecret, 'aes-secret-32-bytes-length!!'],
+  ];
+  const missing = requiredValues
+    .filter(([, value, fallback]) => isPlaceholder(value) || value === fallback)
+    .map(([name]) => name);
+
+  if (!isPlaceholder(env.jwtAccessSecret) && env.jwtAccessSecret.length < 32) {
+    missing.push('JWT_ACCESS_SECRET (minimum 32 characters)');
+  }
+  if (!isPlaceholder(env.jwtRefreshSecret) && env.jwtRefreshSecret.length < 32) {
+    missing.push('JWT_REFRESH_SECRET (minimum 32 characters)');
+  }
+  if (!isPlaceholder(env.aesSecret) && env.aesSecret.length < 32) {
+    missing.push('AES_SECRET (minimum 32 characters)');
+  }
+  if (env.jwtAccessSecret && env.jwtAccessSecret === env.jwtRefreshSecret) {
+    missing.push('JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must differ');
+  }
+  if (!['ses', 'smtp', 'brevo'].includes(env.emailProvider)) {
+    missing.push('EMAIL_PROVIDER (must be ses, smtp, or brevo)');
+  }
+  if (env.emailProvider === 'ses' && !env.awsRegion) missing.push('AWS_REGION');
+  if (env.emailProvider === 'ses' && !(env.awsSesFromEmail || env.emailFrom)) {
+    missing.push('AWS_SES_FROM_EMAIL or EMAIL_FROM');
+  }
+  if (env.emailProvider === 'smtp' && (!env.emailUser || !env.emailPass)) {
+    missing.push('SMTP_USER and SMTP_PASS');
+  }
+  if (env.emailProvider === 'brevo' && !readEnv('BREVO_API_KEY')) {
+    missing.push('BREVO_API_KEY');
+  }
+
+  if (missing.length) {
+    throw new Error(`Invalid production configuration: ${missing.join(', ')}`);
+  }
 }
 
 // Normalize a return URL for strict comparison when validating OAuth return targets
@@ -195,4 +274,11 @@ function isAllowedCorsOrigin(origin) {
   return env.allowedOrigins.includes(normalizedOrigin) || isNativeAppOrigin(normalizedOrigin);
 }
 
-module.exports = { env, isProductionEnv, isAllowedCorsOrigin, isNativeAppOrigin, isAllowedOAuthReturnUrl };
+module.exports = {
+  env,
+  isProductionEnv,
+  validateProductionConfig,
+  isAllowedCorsOrigin,
+  isNativeAppOrigin,
+  isAllowedOAuthReturnUrl,
+};

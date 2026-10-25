@@ -1,6 +1,6 @@
 'use strict';
 
-const { generateText } = require('../../groqService');
+const { classifyGroqError, generateText } = require('../../groqService');
 
 function stripMarkdownCodeFence(value) {
   if (typeof value !== 'string') {
@@ -24,6 +24,23 @@ function parseStructuredJson(value) {
       return null;
     }
   }
+}
+
+function getDecisionFromCandidates(candidates) {
+  const decisions = candidates.map((candidate) => String(candidate.decision || '').trim().toUpperCase());
+  if (decisions.some((decision) => (
+    decision === 'ERROR'
+    || !['MEMORY', 'NO_MEMORY', 'UPDATE', 'SUPERSEDE', 'IGNORE'].includes(decision)
+  ))) {
+    return 'ERROR';
+  }
+  if (decisions.some((decision) => ['MEMORY', 'UPDATE', 'SUPERSEDE'].includes(decision))) {
+    return 'MEMORY';
+  }
+  if (decisions.length > 0 && decisions.every((decision) => decision === 'IGNORE')) {
+    return 'IGNORE';
+  }
+  return 'NO_MEMORY';
 }
 
 function buildMemoryPrompt() {
@@ -54,7 +71,8 @@ Return valid JSON with no markdown fences.
 `.trim();
 }
 
-async function analyzeConversation(input = {}) {
+async function analyzeConversation(input = {}, { generateTextFn = generateText } = {}) {
+  const startedAt = Date.now();
   const payload = {
     userId: input.userId,
     userMessage: input.userMessage || '',
@@ -65,9 +83,10 @@ async function analyzeConversation(input = {}) {
   };
 
   try {
-    const responseText = await generateText({
+    const responseText = await generateTextFn({
       systemInstruction: buildMemoryPrompt(),
       userMessage: JSON.stringify(payload, null, 2),
+      jsonMode: true,
     });
 
     const parsed = parseStructuredJson(responseText);
@@ -78,6 +97,15 @@ async function analyzeConversation(input = {}) {
         failureCategory: 'INVALID_OUTPUT',
         failureCode: 'INVALID_MODEL_OUTPUT',
         reason: 'Groq response could not be parsed as JSON.',
+        diagnostics: {
+          stage: 'response_parsing',
+          providerOperation: 'groq_memory_analysis',
+          inputPresent: Boolean(payload.userMessage || payload.assistantMessage),
+          responseContentPresent: Boolean(responseText),
+          parsingSucceeded: false,
+          validationSucceeded: false,
+          durationMs: Date.now() - startedAt,
+        },
       };
     }
 
@@ -90,22 +118,58 @@ async function analyzeConversation(input = {}) {
         failureCategory: 'INVALID_OUTPUT',
         failureCode: 'INVALID_MODEL_OUTPUT',
         reason: 'Groq response did not match the expected candidate schema.',
+        diagnostics: {
+          stage: 'schema_validation',
+          providerOperation: 'groq_memory_analysis',
+          inputPresent: Boolean(payload.userMessage || payload.assistantMessage),
+          responseContentPresent: true,
+          parsingSucceeded: true,
+          validationSucceeded: false,
+          durationMs: Date.now() - startedAt,
+        },
       };
     }
 
+    const decision = getDecisionFromCandidates(candidates);
     return {
       candidates,
-      decision: candidates.length ? 'MEMORY' : 'NO_MEMORY',
+      decision,
       raw: parsed,
+      diagnostics: {
+        stage: 'extraction_complete',
+        providerDecision: decision,
+        candidateCount: candidates.length,
+        providerOperation: 'groq_memory_analysis',
+        inputPresent: Boolean(payload.userMessage || payload.assistantMessage),
+        responseContentPresent: true,
+        parsingSucceeded: true,
+        validationSucceeded: true,
+        durationMs: Date.now() - startedAt,
+      },
     };
   } catch (error) {
+    const providerFailure = classifyGroqError(error);
     return {
       candidates: [],
       decision: 'ERROR',
       failureCategory: 'INFRASTRUCTURE',
-      failureCode: error?.code || error?.name || 'GROQ_ANALYSIS_FAILURE',
-      reason: error && error.message ? error.message : 'Groq memory analysis failed.',
+      failureCode: providerFailure.category,
+      failureStatus: providerFailure.httpStatus,
+      reason: 'Groq memory analysis failed.',
       raw: null,
+      diagnostics: {
+        stage: 'provider_request',
+        providerOperation: 'groq_memory_analysis',
+        errorClass: providerFailure.errorName,
+        providerCategory: providerFailure.category,
+        providerStatus: providerFailure.httpStatus,
+        providerRequestId: providerFailure.requestId,
+        inputPresent: Boolean(payload.userMessage || payload.assistantMessage),
+        responseContentPresent: false,
+        parsingSucceeded: false,
+        validationSucceeded: false,
+        durationMs: Date.now() - startedAt,
+      },
     };
   }
 }

@@ -1,6 +1,5 @@
 'use strict';
 
-const crypto = require('node:crypto');
 const { analyzeQuery } = require('./queryAnalyzer');
 const { rankMemories } = require('./relevanceRanker');
 const { validateRetrievalResult } = require('./retrievalContract');
@@ -14,17 +13,6 @@ const { embedQuery } = require('../semantic/semanticEmbedding');
 const ACTIVE_STATUSES = new Set(['ACTIVE', 'CANDIDATE']);
 const HISTORICAL_STATUSES = new Set(['ACTIVE', 'CANDIDATE', 'SUPERSEDED']);
 const INACTIVE_STATUSES = new Set(['SUPERSEDED', 'EXPIRED', 'ARCHIVED']);
-
-function logRetrievalStage({ traceId, userId, stage, status, elapsedMs, ...details }) {
-  console.info('[MEMORY_RETRIEVAL_DETAIL]', JSON.stringify({
-    traceId: traceId || 'untraced',
-    userIdHash: crypto.createHash('sha256').update(String(userId || '')).digest('hex').slice(0, 12),
-    stage,
-    status,
-    elapsedMs,
-    ...details,
-  }));
-}
 
 function queryMatchesMemory(memory, query, analysis = {}) {
   if (!query || !String(query).trim()) return true;
@@ -84,10 +72,8 @@ class MemoryRetriever {
     this.embedQuery = embedQueryFn || embedQuery;
   }
 
-  async _readFromCache(userId, traceId) {
-    const startedAt = Date.now();
+  async _readFromCache(userId) {
     if (!this.cache || typeof this.cache.getByUser !== 'function') {
-      logRetrievalStage({ traceId, userId, stage: 'redis_cache_lookup', status: 'SKIPPED', elapsedMs: 0, resultCount: 0 });
       return [];
     }
     try {
@@ -95,62 +81,24 @@ class MemoryRetriever {
       const memories = Array.isArray(results)
         ? results.filter((memory) => String(memory.userId || '') === String(userId))
         : [];
-      logRetrievalStage({
-        traceId,
-        userId,
-        stage: 'redis_cache_lookup',
-        status: 'SUCCESS',
-        elapsedMs: Date.now() - startedAt,
-        resultCount: memories.length,
-      });
       return memories;
     } catch (error) {
-      logRetrievalStage({
-        traceId,
-        userId,
-        stage: 'redis_cache_lookup',
-        status: 'FAILURE',
-        elapsedMs: Date.now() - startedAt,
-        errorCode: error?.code || error?.name || 'REDIS_CACHE_READ_FAILURE',
-        resultCount: 0,
-      });
       return [];
     }
   }
 
-  async _readFromRepository(userId, options = {}, traceId) {
-    const startedAt = Date.now();
+  async _readFromRepository(userId, options = {}) {
     if (!this.repository) return [];
     const queryOptions = { limit: 100, sort: { updatedAt: -1 } };
     try {
       let memories = [];
-      let operation = 'find_active_by_user';
       if (options.historical && typeof this.repository.findByUser === 'function') {
-        operation = 'find_by_user';
         memories = await this.repository.findByUser(userId, queryOptions);
       } else if (typeof this.repository.findActiveByUser === 'function') {
         memories = await this.repository.findActiveByUser(userId, queryOptions);
       }
-      logRetrievalStage({
-        traceId,
-        userId,
-        stage: 'mongo_repository_read',
-        operation,
-        status: 'SUCCESS',
-        elapsedMs: Date.now() - startedAt,
-        resultCount: memories.length,
-        limit: queryOptions.limit,
-      });
       return memories;
     } catch (error) {
-      logRetrievalStage({
-        traceId,
-        userId,
-        stage: 'mongo_repository_read',
-        status: 'FAILURE',
-        elapsedMs: Date.now() - startedAt,
-        errorCode: error?.code || error?.name || 'MONGO_REPOSITORY_READ_FAILURE',
-      });
       throw error;
     }
   }
@@ -176,8 +124,7 @@ class MemoryRetriever {
     return Promise.all(uniqueIds.map((id) => this._getMongoMemory(userId, id)));
   }
 
-  async _validateStructuredCandidates(userId, candidates, filterOptions, traceId) {
-    const startedAt = Date.now();
+  async _validateStructuredCandidates(userId, candidates, filterOptions) {
     const uniqueIds = [...new Set(candidates.map(canonicalMemoryId).filter(Boolean))];
     try {
       const authoritative = await this._getMongoMemories(userId, uniqueIds);
@@ -188,49 +135,19 @@ class MemoryRetriever {
           && String(memory.userId) === String(userId)
           && isEligibleLifecycle(memory, filterOptions)
           && isTemporallyValid(memory, filterOptions.historical));
-      logRetrievalStage({
-        traceId,
-        userId,
-        stage: 'mongo_authoritative_validation',
-        status: 'SUCCESS',
-        elapsedMs: Date.now() - startedAt,
-        candidateCount: uniqueIds.length,
-        validatedCount: validated.length,
-      });
       return validated;
     } catch (error) {
-      logRetrievalStage({
-        traceId,
-        userId,
-        stage: 'mongo_authoritative_validation',
-        status: 'FAILURE',
-        elapsedMs: Date.now() - startedAt,
-        candidateCount: uniqueIds.length,
-        errorCode: error?.code || error?.name || 'MONGO_VALIDATION_FAILURE',
-      });
       throw error;
     }
   }
 
   async _readSemanticCandidates(userId, query, options, latency) {
     const startedAt = Date.now();
-    const traceId = options.traceId;
     const timings = { embeddingLatencyMs: 0, pineconeQueryLatencyMs: 0, semanticStatus: 'SEMANTIC_NO_MATCH' };
     const finish = (memories) => {
       latency.embeddingLatencyMs = timings.embeddingLatencyMs;
       latency.pineconeQueryLatencyMs = timings.pineconeQueryLatencyMs;
       latency.semanticLatencyMs = Date.now() - startedAt;
-      logRetrievalStage({
-        traceId,
-        userId,
-        stage: 'semantic_retrieval',
-        status: timings.semanticStatus,
-        elapsedMs: latency.semanticLatencyMs,
-        embeddingLatencyMs: timings.embeddingLatencyMs,
-        pineconeQueryLatencyMs: timings.pineconeQueryLatencyMs,
-        resultCount: memories.length,
-        errorCode: timings.semanticErrorCode || null,
-      });
       return { memories, timings };
     };
     if (!this.semantic || typeof this.semantic.query !== 'function' || !String(query || '').trim()) {
@@ -301,6 +218,7 @@ class MemoryRetriever {
     }
 
     const safeUserId = String(userId).trim();
+    options.signal?.throwIfAborted();
     const queryText = String(query || '').trim();
     const analysis = analyzeQuery(queryText);
     const historical = Boolean(options.historical || shouldIncludeHistory(queryText));
@@ -315,7 +233,8 @@ class MemoryRetriever {
     let source = 'none';
     if (includeStructured) {
       const structuredStartedAt = Date.now();
-      const cached = await this._readFromCache(safeUserId, options.traceId);
+      const cached = await this._readFromCache(safeUserId);
+      options.signal?.throwIfAborted();
       activeCached = cached.filter((memory) => (
         isEligibleLifecycle(memory, filterOptions)
         && isTemporallyValid(memory, historical)
@@ -327,7 +246,6 @@ class MemoryRetriever {
           safeUserId,
           activeCached,
           filterOptions,
-          options.traceId,
         );
         if (structuredCandidates.length) {
           source = 'cache';
@@ -337,7 +255,8 @@ class MemoryRetriever {
       }
 
       if (!activeCached.length) {
-        structuredCandidates = await this._readFromRepository(safeUserId, { historical }, options.traceId);
+        structuredCandidates = await this._readFromRepository(safeUserId, { historical });
+        options.signal?.throwIfAborted();
         structuredCandidates = structuredCandidates.filter((memory) => (
           isEligibleLifecycle(memory, filterOptions)
           && isTemporallyValid(memory, historical)
@@ -366,6 +285,7 @@ class MemoryRetriever {
           memories: [],
           timings: { semanticStatus: 'NOT_REQUESTED', semanticErrorCode: null },
         };
+    options.signal?.throwIfAborted();
 
     const mergeStartedAt = Date.now();
     const merged = new Map();
@@ -384,8 +304,8 @@ class MemoryRetriever {
       safeUserId,
       [...merged.values()],
       filterOptions,
-      options.traceId,
     );
+    options.signal?.throwIfAborted();
     latency.mongoValidationLatencyMs = Date.now() - validationStartedAt;
     const semanticScores = new Map(semanticResult.memories.map((memory) => [
       canonicalMemoryId(memory),

@@ -125,16 +125,17 @@ test('validates candidate IDs with a user-scoped repository batch when available
   assert.ok(batchCalls.every((call) => call.memoryIds.includes(CURRENT_MEMORY.id)));
 });
 
-test('reports cache, repository, and authoritative validation timings without raw query or user ID', async () => {
+test('returns retrieval latency metadata without writing diagnostic logs', async () => {
   const { retriever } = createRetriever({ repositoryMemories: [CURRENT_MEMORY] });
   const originalInfo = console.info;
-  const events = [];
+  let logged = false;
   console.info = (label, payload) => {
-    if (label === '[MEMORY_RETRIEVAL_DETAIL]') events.push(JSON.parse(payload));
+    logged = true;
   };
 
+  let result;
   try {
-    await retriever.retrieve({
+    result = await retriever.retrieve({
       userId: USER_ID,
       query: 'What is my current project?',
       options: { includeSemantic: false, traceId: 'stage-timing-trace' },
@@ -143,13 +144,8 @@ test('reports cache, repository, and authoritative validation timings without ra
     console.info = originalInfo;
   }
 
-  assert.deepEqual(events.map((event) => event.stage), [
-    'redis_cache_lookup',
-    'mongo_repository_read',
-    'mongo_authoritative_validation',
-  ]);
-  assert.ok(events.every((event) => event.traceId === 'stage-timing-trace'));
-  assert.ok(events.every((event) => event.userIdHash && !JSON.stringify(event).includes(USER_ID)));
-  assert.ok(events.every((event) => !JSON.stringify(event).includes('What is my current project?')));
-  assert.ok(events.every((event) => Number.isFinite(event.elapsedMs)));
+  assert.equal(logged, false);
+  assert.equal(result.memories[0].id, CURRENT_MEMORY.id);
+  assert.ok(Number.isFinite(result.latency.structuredRetrievalLatencyMs));
+  assert.ok(Number.isFinite(result.latency.totalCanonicalRetrievalLatencyMs));
 });

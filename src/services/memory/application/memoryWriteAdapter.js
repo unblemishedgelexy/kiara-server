@@ -56,9 +56,14 @@ function resolveTemporal(input, candidateTemporal, timestamp) {
 }
 
 function isExtractorInfrastructureFailure(result) {
-  if (result?.failureCategory) return true;
-  return /failed|unavailable|timed?\s*out|could not be parsed|rate limit|api key|groq|provider|network|request error/i
-    .test(String(result?.reason || ''));
+  return result?.failureCategory === 'INFRASTRUCTURE'
+    || result?.decision === 'ERROR';
+}
+
+function safeFailureCode(value, fallback = 'MEMORY_EXTRACTION_FAILURE') {
+  return typeof value === 'string' && /^[A-Z0-9_-]{1,64}$/.test(value)
+    ? value
+    : fallback;
 }
 
 function persistedMemories(result) {
@@ -114,9 +119,14 @@ function createMemoryWriteAdapter({
       });
     }
     if (SMALL_TALK_ONLY.test(safeUserMessage)) {
-      return createWriteResult('NO_MEMORY', {
+      return createWriteResult('NO_OP', {
         metadata: {
           extractionDecision: 'SKIPPED_SMALL_TALK',
+          writeStage: 'memory_eligibility',
+          candidateCount: 0,
+          persistenceAttempted: false,
+          persistenceConfirmed: false,
+          mongoAcknowledged: null,
           mongoStatus: 'NOT_ATTEMPTED',
           cacheStatus: 'NOT_ATTEMPTED',
           semanticIndexStatus: 'NOT_ATTEMPTED',
@@ -155,7 +165,8 @@ function createMemoryWriteAdapter({
         metadata: {
           turnId,
           extractionDecision: 'THREW',
-          extractionFailureCode: error?.code || error?.name || 'MEMORY_EXTRACTION_FAILURE',
+          extractionFailureCode: safeFailureCode(error?.code || error?.name),
+          extractionFailureCategory: 'INFRASTRUCTURE',
           mongoStatus: 'NOT_ATTEMPTED',
           cacheStatus: 'NOT_ATTEMPTED',
           semanticIndexStatus: 'NOT_ATTEMPTED',
@@ -165,7 +176,19 @@ function createMemoryWriteAdapter({
     }
 
     if (!extracted || extracted.ok === false || !Array.isArray(extracted.candidates) || extracted.candidates.length === 0) {
-      const status = isExtractorInfrastructureFailure(extracted) ? 'EXTRACTION_FAILURE' : 'NO_MEMORY';
+      const explicitNoMemory = extracted?.decision === 'NO_MEMORY'
+        && Array.isArray(extracted.candidates)
+        && extracted.candidates.length === 0;
+      const explicitNoOp = extracted?.decision === 'NO_OP'
+        && Array.isArray(extracted.candidates)
+        && extracted.candidates.length === 0;
+      const validationRejected = extracted?.decision === 'CANDIDATES_REJECTED'
+        || (!isExtractorInfrastructureFailure(extracted) && !explicitNoMemory && !explicitNoOp);
+      const status = isExtractorInfrastructureFailure(extracted)
+        ? 'EXTRACTION_FAILURE'
+        : (validationRejected
+          ? 'VALIDATION_REJECTION'
+          : (explicitNoOp ? 'NO_OP' : 'NO_MEMORY'));
       return createWriteResult(status, {
         ...(status === 'EXTRACTION_FAILURE'
           ? { error: { code: status, message: 'Canonical memory extraction is temporarily unavailable.' } }
@@ -173,8 +196,29 @@ function createMemoryWriteAdapter({
         metadata: {
           decision: extracted?.decision || 'NO_MEMORY',
           extractionDecision: extracted?.decision || 'NO_MEMORY',
+          extractionReasonCode: extracted?.reasonCode || null,
+          extractionDiagnostics: extracted?.diagnostics || null,
+          writeStage: status === 'NO_MEMORY'
+            ? 'extraction_decision'
+            : (status === 'NO_OP'
+              ? 'extraction_no_op'
+              : (status === 'EXTRACTION_FAILURE' ? 'extraction' : 'candidate_validation')),
+          validationFailureCode: validationRejected
+            ? (extracted?.decision === 'CANDIDATES_REJECTED' ? 'CANDIDATES_REJECTED' : 'INVALID_EXTRACTION_RESULT')
+            : undefined,
+          candidateCount: Array.isArray(extracted?.candidates) ? extracted.candidates.length : 0,
+          persistenceAttempted: false,
+          persistenceConfirmed: false,
+          mongoAcknowledged: null,
           ...(status === 'EXTRACTION_FAILURE'
-            ? { extractionFailureCode: extracted?.failureCode || extracted?.failureCategory || 'MEMORY_EXTRACTION_FAILURE' }
+            ? {
+              extractionFailureCode: safeFailureCode(extracted?.failureCode),
+              extractionFailureCategory: safeFailureCode(
+                extracted?.failureCategory,
+                extracted?.decision === 'ERROR' ? 'INVALID_OUTPUT' : 'UNKNOWN',
+              ),
+              ...(Number.isInteger(extracted?.failureStatus) ? { extractionFailureStatus: extracted.failureStatus } : {}),
+            }
             : {}),
           turnId,
           mongoStatus: 'NOT_ATTEMPTED',
@@ -192,11 +236,16 @@ function createMemoryWriteAdapter({
     let semanticFailure = false;
     let consolidationFailure = false;
     let mongoFailure = false;
+    let mongoWriteAttemptCount = 0;
+    let mongoAcknowledgedCount = 0;
 
     for (let index = 0; index < extracted.candidates.length; index += 1) {
       const extractedCandidate = extracted.candidates[index];
       const original = asPlainMemory(extractedCandidate?.memory || extractedCandidate);
-      if (!original || typeof original !== 'object') continue;
+      if (!original || typeof original !== 'object') {
+        decisions.push({ decision: 'VALIDATION_REJECTION', code: 'INVALID_NORMALIZED_CANDIDATE' });
+        continue;
+      }
 
       const memory = {
         ...original,
@@ -232,10 +281,19 @@ function createMemoryWriteAdapter({
           candidate: memory,
           options: { dryRun },
         });
+        if (consolidation?.persistenceAttempted === true) {
+          mongoWriteAttemptCount += 1;
+          if (consolidation.persisted === true && consolidation.result) {
+            mongoAcknowledgedCount += 1;
+          }
+        }
       } catch (error) {
+        if (error?.persistenceAttempted === true) {
+          mongoWriteAttemptCount += 1;
+        }
         if (error?.name === 'MemoryConflictError'
           && (error?.cause?.code === 11000 || /already exists/i.test(String(error.message || '')))) {
-          decisions.push({ decision: 'DUPLICATE' });
+          decisions.push({ decision: 'DUPLICATE', code: 'MONGO_UNIQUE_CONFLICT' });
           continue;
         }
         consolidationFailure = true;
@@ -244,7 +302,12 @@ function createMemoryWriteAdapter({
         continue;
       }
       latency.consolidationLatencyMs = (latency.consolidationLatencyMs || 0) + Date.now() - consolidationStartedAt;
-      decisions.push({ decision: consolidation?.decision || 'IGNORE' });
+      const canonicalDecision = consolidation?.decision || 'IGNORE';
+      const decisionCode = safeFailureCode(consolidation?.reasonCode, null);
+      decisions.push({
+        decision: canonicalDecision,
+        ...(decisionCode ? { code: decisionCode } : {}),
+      });
 
       if (consolidation?.decision === 'DUPLICATE') {
         continue;
@@ -257,7 +320,7 @@ function createMemoryWriteAdapter({
       }
       if (!consolidation?.persisted || !consolidation.result) {
         if (isWriteConflict(consolidation?.error)) {
-          decisions[decisions.length - 1] = { decision: 'DUPLICATE' };
+          decisions[decisions.length - 1] = { decision: 'DUPLICATE', code: 'MONGO_UNIQUE_CONFLICT' };
           continue;
         }
         consolidationFailure = true;
@@ -303,8 +366,19 @@ function createMemoryWriteAdapter({
     result.metadata = {
       turnId,
       extractionDecision: extracted.decision || 'MEMORY',
+      extractionDiagnostics: extracted.diagnostics || null,
       decisions,
-      mongoStatus: dryRun ? 'DRY_RUN' : (savedMemories.length ? 'SUCCESS' : 'NOT_ATTEMPTED'),
+      candidateCount: extracted.candidates.length,
+      persistenceAttempted: mongoWriteAttemptCount > 0,
+      persistenceConfirmed: savedMemories.length > 0,
+      mongoAcknowledged: mongoWriteAttemptCount === 0
+        ? null
+        : mongoAcknowledgedCount === mongoWriteAttemptCount,
+      mongoStatus: dryRun
+        ? 'DRY_RUN'
+        : (mongoWriteAttemptCount === 0
+          ? 'NOT_ATTEMPTED'
+          : (mongoAcknowledgedCount === mongoWriteAttemptCount ? 'SUCCESS' : 'FAILED')),
       cacheStatus: dryRun ? 'NOT_ATTEMPTED' : (cacheFailure ? 'FAILURE' : 'SUCCESS'),
       semanticIndexStatus: dryRun
         ? 'NOT_ATTEMPTED'
@@ -313,8 +387,9 @@ function createMemoryWriteAdapter({
     };
 
     if (dryRun) {
-      result.status = decisions.length ? 'SUCCESS' : 'NO_MEMORY';
+      result.status = 'DRY_RUN';
       result.ok = true;
+      result.metadata.writeStage = 'shadow_evaluation';
       result.metadata.dryRun = true;
       return result;
     }
@@ -343,6 +418,7 @@ function createMemoryWriteAdapter({
         memories: [],
         metadata: {
           ...result.metadata,
+          writeStage: mongoWriteAttemptCount > 0 ? 'canonical_persistence' : 'canonical_lookup',
           mongoStatus: 'FAILED',
           cacheStatus: 'NOT_ATTEMPTED',
           semanticIndexStatus: 'NOT_ATTEMPTED',
@@ -356,16 +432,31 @@ function createMemoryWriteAdapter({
         saved: savedMemories.length > 0,
         metadata: {
           ...result.metadata,
+          writeStage: 'canonical_consolidation',
           mongoStatus: savedMemories.length ? 'PARTIAL' : 'FAILED',
         },
       });
     }
     if (!savedMemories.length) {
       const duplicateOnly = decisions.length > 0 && decisions.every(({ decision }) => decision === 'DUPLICATE');
-      return createWriteResult(duplicateOnly ? 'DUPLICATE' : 'NO_MEMORY', {
+      const allRejected = decisions.length > 0
+        && decisions.every(({ decision }) => decision === 'VALIDATION_REJECTION');
+      const allIgnored = decisions.length > 0
+        && decisions.every(({ decision }) => decision === 'IGNORE');
+      const status = duplicateOnly
+        ? 'DUPLICATE'
+        : (allRejected ? 'VALIDATION_REJECTION' : (allIgnored ? 'VALIDATION_REJECTION' : 'NO_OP'));
+      return createWriteResult(status, {
         metadata: {
           ...result.metadata,
-          mongoStatus: 'NOT_ATTEMPTED',
+          writeStage: duplicateOnly ? 'deduplication' : 'candidate_validation',
+          validationFailureCode: allRejected || allIgnored
+            ? (decisions.find(({ decision }) => ['IGNORE', 'VALIDATION_REJECTION'].includes(decision))?.code
+              || 'CANDIDATE_REJECTED_BY_POLICY')
+            : undefined,
+          mongoStatus: mongoWriteAttemptCount > 0
+            ? (mongoFailure ? 'FAILED' : 'DUPLICATE')
+            : 'NOT_ATTEMPTED',
           cacheStatus: 'NOT_ATTEMPTED',
           semanticIndexStatus: 'NOT_ATTEMPTED',
         },
@@ -383,6 +474,8 @@ function createMemoryWriteAdapter({
       warnings,
       metadata: {
         ...result.metadata,
+        writeStage: 'persistence_confirmation',
+        persistenceConfirmed: true,
         cacheStatus: cacheFailure ? 'FAILURE' : 'SUCCESS',
         semanticIndexStatus: semanticFailure ? 'FAILURE' : 'SUCCESS',
       },

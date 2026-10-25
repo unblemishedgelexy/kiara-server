@@ -1,7 +1,9 @@
 const express = require('express');
 const fs = require('node:fs/promises');
+const { createWriteStream } = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { Transform, pipeline } = require('node:stream');
 const { randomUUID } = require('node:crypto');
 const multer = require('multer');
 const { GoogleGenAI } = require('@google/genai');
@@ -17,21 +19,49 @@ const {
 
 const { env } = require('../config/env');
 const authMiddleware = require('../middleware/authMiddleware');
+const redisAbuseProtection = require('../middleware/redisAbuseProtection');
 const subscriptionUsageService = require('../services/subscriptions/usageService');
 
 const router = express.Router();
+const protectExpensive = redisAbuseProtection({ scope: 'account-ip', bucket: 'expensive' });
+const protectLiveToken = redisAbuseProtection({ scope: 'account-ip', bucket: 'live-token' });
 
 const geminiHealth = require('../services/../services/live/geminiHealth');
 
 const MAX_ATTACHMENT_COUNT = 5;
 const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+const attachmentStorage = {
+  _handleFile(req, file, callback) {
+    const filename = `${randomUUID()}${path.extname(file.originalname).toLowerCase()}`;
+    const filePath = path.join(os.tmpdir(), filename);
+    let size = 0;
+    const aggregateLimit = new Transform({
+      transform(chunk, _encoding, done) {
+        size += chunk.length;
+        req.attachmentBytes = (req.attachmentBytes || 0) + chunk.length;
+        if (req.attachmentBytes > MAX_ATTACHMENT_BYTES) {
+          done(Object.assign(new Error('Combined attachment size limit exceeded.'), { code: 'LIMIT_TOTAL_FILE_SIZE' }));
+          return;
+        }
+        done(null, chunk);
+      },
+    });
+
+    pipeline(file.stream, aggregateLimit, createWriteStream(filePath, { flags: 'wx' }), (error) => {
+      if (error) {
+        void fs.rm(filePath, { force: true });
+        callback(error);
+        return;
+      }
+      callback(null, { destination: os.tmpdir(), filename, path: filePath, size });
+    });
+  },
+  _removeFile(_req, file, callback) {
+    fs.rm(file.path, { force: true }).then(() => callback(null), callback);
+  },
+};
 const attachmentUpload = multer({
-  storage: multer.diskStorage({
-    destination: os.tmpdir(),
-    filename: (_req, file, callback) => {
-      callback(null, `${randomUUID()}${path.extname(file.originalname).toLowerCase()}`);
-    },
-  }),
+  storage: attachmentStorage,
   limits: {
     fileSize: MAX_ATTACHMENT_BYTES,
     files: MAX_ATTACHMENT_COUNT,
@@ -45,11 +75,11 @@ function parseAttachmentUpload(req, res, next) {
       return;
     }
 
-    const tooLarge = error.code === 'LIMIT_FILE_SIZE';
+    const tooLarge = error.code === 'LIMIT_FILE_SIZE' || error.code === 'LIMIT_TOTAL_FILE_SIZE';
     res.status(tooLarge ? 413 : 400).json({
       success: false,
       message: tooLarge
-        ? 'Each attachment must be smaller than 100 MB.'
+        ? 'Each attachment and the combined upload must be smaller than 100 MB.'
         : 'Unable to receive these attachments.',
     });
   });
@@ -133,12 +163,12 @@ router.get('/health', async (_req, res) => {
       elevenLabsConfigured,
       geminiConfigured,
       geminiAvailable,
-      geminiLastError: health.lastError,
+      geminiLastError: health.lastError ? 'provider_unavailable' : null,
       offlineMode,
       ok: true,
     });
   } catch (error) {
-    console.error('[ERROR] Live health check failed:', error);
+    console.error('[LIVE_HEALTH_CHECK_FAILED]', error?.name || error?.code || 'ProviderError');
 
     res.status(500).json({
       elevenLabsConfigured: Boolean(
@@ -146,8 +176,7 @@ router.get('/health', async (_req, res) => {
       ),
       geminiConfigured: Boolean(env.geminiApiKey),
       geminiAvailable: false,
-      geminiLastError:
-        error instanceof Error ? error.message : String(error),
+      geminiLastError: 'provider_unavailable',
       offlineMode: true,
       ok: false,
     });
@@ -193,13 +222,17 @@ router.post('/health/check', async (_req, res) => {
  *
  * Gemini Live token route remains completely separate.
  */
-router.post('/tts', authMiddleware.optional, async (req, res) => {
-  const traceId =
-    req.headers['x-kiara-trace-id'] ||
-    req.headers['X-Kiara-Trace-Id'] ||
-    `tts-${Date.now().toString(36)}-${Math.random()
-      .toString(36)
-      .slice(2, 8)}`;
+router.post('/tts', authMiddleware, protectExpensive, async (req, res) => {
+  const requestedTraceId = req.headers['x-kiara-trace-id'];
+  const traceId = typeof requestedTraceId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(requestedTraceId)
+    ? requestedTraceId
+    : randomUUID();
+  const upstreamController = new AbortController();
+  const upstreamTimeout = setTimeout(() => upstreamController.abort(), 30000);
+  const abortIfClientClosed = () => {
+    if (!res.writableEnded) upstreamController.abort();
+  };
+  res.once('close', abortIfClientClosed);
 
   try {
     /**
@@ -276,7 +309,7 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
      * Call existing ElevenLabs service
      * ----------------------------------------------------------
      */
-    const elevenLabsResponse = await streamElevenLabsSpeech(text);
+    const elevenLabsResponse = await streamElevenLabsSpeech(text, { signal: upstreamController.signal });
 
     if (!elevenLabsResponse) {
       res.status(503).json({
@@ -293,21 +326,13 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
      * ----------------------------------------------------------
      */
     if (!elevenLabsResponse.ok) {
-      let providerError = '';
-
-      try {
-        providerError = await elevenLabsResponse.text();
-      } catch {
-        providerError = '';
-      }
+      await elevenLabsResponse.body?.cancel().catch(() => {});
 
       console.error(
         '[KIARA_TTS] ElevenLabs request failed',
         JSON.stringify({
           traceId,
           status: elevenLabsResponse.status,
-          statusText: elevenLabsResponse.statusText,
-          providerError: providerError.slice(0, 1000),
         })
       );
 
@@ -391,10 +416,7 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
         '[KIARA_TTS] Audio streaming failed',
         JSON.stringify({
           traceId,
-          error:
-            streamError instanceof Error
-              ? streamError.message
-              : String(streamError),
+          error: streamError?.name || streamError?.code || 'StreamError',
         })
       );
 
@@ -411,14 +433,11 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
      * ----------------------------------------------------------
      */
   } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : String(error);
-
     console.error(
       '[KIARA_TTS] Failed to generate ElevenLabs speech',
       JSON.stringify({
         traceId,
-        error: errorMessage,
+        error: error?.name || error?.code || 'ProviderError',
       })
     );
 
@@ -438,6 +457,9 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
       error: 'Failed to generate ElevenLabs speech.',
       reason: 'tts_generation_failed',
     });
+  } finally {
+    clearTimeout(upstreamTimeout);
+    res.removeListener('close', abortIfClientClosed);
   }
 });
 
@@ -449,7 +471,7 @@ router.post('/tts', authMiddleware.optional, async (req, res) => {
  * IMPORTANT:
  * ElevenLabs TTS is intentionally NOT mixed into this route.
  */
-router.post('/token', authMiddleware, async (req, res) => {
+router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
   const traceId =
     req.headers['x-kiara-trace-id'] ||
     req.headers['X-Kiara-Trace-Id'] ||
@@ -574,41 +596,37 @@ router.post('/token', authMiddleware, async (req, res) => {
     const normalizedMessage =
       errorMessage.toLowerCase();
 
-    const responseBody = {
-      success: false,
-      code: error?.code || 'LIVE_TOKEN_FAILED',
-      error: errorMessage,
-      ...(error?.details ? { details: error.details } : {}),
-    };
-
     let statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+    let reason;
 
     if (
       normalizedMessage.includes('gemini api key')
     ) {
       statusCode = 503;
-      responseBody.reason = 'gemini_not_configured';
+      reason = 'gemini_not_configured';
     } else if (
       normalizedMessage.includes(
         'failed to create gemini live ephemeral token'
       )
     ) {
       statusCode = 502;
-      responseBody.reason =
-        'token_generation_failed';
+      reason = 'token_generation_failed';
     }
 
-    console.error(
-      '[ERROR]',
-      'Failed to create live token:',
-      errorMessage
-    );
+    const responseBody = {
+      success: false,
+      code: error?.code || 'LIVE_TOKEN_FAILED',
+      error: statusCode >= 500 ? 'Live session is temporarily unavailable.' : error?.message || 'Request failed.',
+      ...(reason ? { reason } : {}),
+      ...(statusCode < 500 && error?.details ? { details: error.details } : {}),
+    };
 
+    console.error('[LIVE_TOKEN_FAILED]', error?.name || error?.code || 'ProviderError');
     res.status(statusCode).json(responseBody);
   }
 });
 
-router.post('/analyze-attachments', authMiddleware, parseAttachmentUpload, async (req, res) => {
+router.post('/analyze-attachments', authMiddleware, protectExpensive, parseAttachmentUpload, async (req, res) => {
   const files = Array.isArray(req.files) ? req.files : [];
   const uploadedFiles = [];
   let ai = null;
@@ -676,8 +694,8 @@ router.post('/analyze-attachments', authMiddleware, parseAttachmentUpload, async
     return res.json({ success: true, analysis });
   } catch (error) {
     console.error('[LIVE_ATTACHMENT_ANALYSIS]', {
-      userId: req.userId || null,
-      error: error instanceof Error ? error.message : String(error),
+      requestId: req.requestId || null,
+      error: error?.name || error?.code || 'ProviderError',
     });
     return res.status(502).json({
       success: false,

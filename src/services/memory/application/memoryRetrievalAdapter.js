@@ -12,31 +12,22 @@ const {
   createNoMemoryResult,
   createFailureResult,
   safeMemorySummary,
-  hashIdentifier,
 } = require('./memoryRetrievalAdapterContract');
 
 const STOP_WORDS = new Set(['actually', 'today', 'just', 'said', 'say', 'tell', 'told', 'you', 'i', 'am', 'is', 'the', 'my', 'user', 'prefer', 'prefers', 'use', 'using', 'switched', 'from', 'to', 'now']);
 const UPDATE_CUES = /\b(switched|switching|no longer|don't use|do not use|stopped using|instead|now use|now prefer|changed to|moved to)\b/i;
-const DEFAULT_SOURCE_TIMEOUT_MS = 10000;
+const DEFAULT_SOURCE_TIMEOUT_MS = env.memoryRetrievalSourceTimeoutMs;
+const DEFAULT_RETRIEVAL_TIMEOUT_MS = env.memoryRetrievalTimeoutMs;
 
-function withSourceTimeout(operation, timeoutMs, code, onLateSettlement) {
+function withSourceTimeout(operation, timeoutMs, code) {
   let timeout;
-  let timedOut = false;
-  const startedAt = Date.now();
-  const sourcePromise = Promise.resolve().then(operation);
-  sourcePromise.then(
-    () => {
-      if (timedOut) onLateSettlement?.('completed', Date.now() - startedAt, null);
-    },
-    (error) => {
-      if (timedOut) onLateSettlement?.('failed', Date.now() - startedAt, error?.code || error?.name || 'SOURCE_FAILURE');
-    },
-  );
+  const controller = new AbortController();
+  const sourcePromise = Promise.resolve().then(() => operation(controller.signal));
   return Promise.race([
     sourcePromise,
     new Promise((_, reject) => {
       timeout = setTimeout(() => {
-        timedOut = true;
+        controller.abort();
         const error = new Error('Memory source retrieval timed out.');
         error.code = code;
         reject(error);
@@ -184,20 +175,61 @@ function getUsedSources(memories) {
   return ['stm', 'long_term', 'semantic'].filter((source) => sources.has(source));
 }
 
+function createRetrievalKey(input = {}) {
+  const options = input.options || {};
+  return JSON.stringify([
+    String(input.userId || '').trim(),
+    String(input.sessionId || ''),
+    String(input.query || '').trim(),
+    normalizeOptions(options),
+    Number(options.sourceTimeoutMs) || null,
+    Number(options.retrievalTimeoutMs) || null,
+  ]);
+}
+
 function createMemoryRetrievalAdapter({
   stmAdapter = new StmMemoryAdapter(),
   retrieverFactory = () => new MemoryRetriever(),
   sourceTimeoutMs = DEFAULT_SOURCE_TIMEOUT_MS,
+  retrievalTimeoutMs = DEFAULT_RETRIEVAL_TIMEOUT_MS,
   plannerEnabled = env.memoryGroqQueryPlannerEnabled,
   planMemoryQuery = defaultPlanMemoryQuery,
 } = {}) {
-  async function retrieveMemoryContext({ userId, query, sessionId, options = {} } = {}) {
+  const inFlightRetrievals = new Map();
+
+  async function retrieveMemoryContext(input = {}) {
+    const key = createRetrievalKey(input);
+    const existing = inFlightRetrievals.get(key);
+    if (existing) return existing;
+
+    const retrieval = retrieveMemoryContextUnshared(input);
+    inFlightRetrievals.set(key, retrieval);
+    try {
+      return await retrieval;
+    } finally {
+      if (inFlightRetrievals.get(key) === retrieval) inFlightRetrievals.delete(key);
+    }
+  }
+
+  async function retrieveMemoryContextUnshared({ userId, query, sessionId, options = {} } = {}) {
     const startedAt = Date.now();
 
     try {
       const normalizedUserId = validateUserId(userId);
       const normalizedOptions = normalizeOptions(options || {});
       const traceId = String(options?.traceId || 'untraced');
+      const requestedSourceTimeoutMs = Number(options?.sourceTimeoutMs);
+      const effectiveSourceTimeoutMs = Number.isFinite(requestedSourceTimeoutMs)
+        && requestedSourceTimeoutMs > 0
+        ? Math.min(sourceTimeoutMs, requestedSourceTimeoutMs)
+        : sourceTimeoutMs;
+      const requestedRetrievalTimeoutMs = Number(options?.retrievalTimeoutMs);
+      const effectiveRetrievalTimeoutMs = Number.isFinite(requestedRetrievalTimeoutMs)
+        && requestedRetrievalTimeoutMs > 0
+        ? Math.min(retrievalTimeoutMs, requestedRetrievalTimeoutMs)
+        : retrievalTimeoutMs;
+      const retrievalDeadline = startedAt + effectiveRetrievalTimeoutMs;
+      const remainingBudgetMs = () => Math.max(0, retrievalDeadline - Date.now());
       const text = String(query || '').trim();
       const route = routeMemorySources(text, normalizedOptions);
       const analysis = route.analysis;
@@ -205,7 +237,8 @@ function createMemoryRetrievalAdapter({
       const attemptedSources = new Set();
       let stmMemories = [];
       let canonicalMemories = [];
-      let canonicalResult = null;
+      const canonicalResults = { long_term: null, semantic: null };
+      const canonicalSourceLatencyMs = { long_term: null, semantic: null };
       let sourceLatencyMs = 0;
       let stmLatencyMs = null;
       let mergeLatencyMs = 0;
@@ -218,25 +251,30 @@ function createMemoryRetrievalAdapter({
         const requested = new Set(sources);
         const tasks = [];
         const sourceStartedAt = Date.now();
+        const budgetMs = remainingBudgetMs();
+
+        if (budgetMs <= 0) {
+          for (const source of requested) {
+            attemptedSources.add(source);
+            sourceErrors[source.toLowerCase()] = 'MEMORY_RETRIEVAL_DEADLINE';
+          }
+          return;
+        }
+        const sourceTimeout = Math.min(effectiveSourceTimeoutMs, budgetMs);
+        const timeoutCode = budgetMs <= effectiveSourceTimeoutMs
+          ? 'MEMORY_RETRIEVAL_DEADLINE'
+          : null;
 
         if (requested.has('STM')) {
           attemptedSources.add('STM');
           const stmStartedAt = Date.now();
-          tasks.push(withSourceTimeout(() => stmAdapter.getRecentContext({
+          tasks.push(withSourceTimeout((signal) => stmAdapter.getRecentContext({
             userId: normalizedUserId,
             sessionId,
             query: text,
             analysis,
-            options: { limit: Math.min(normalizedOptions.maxMemories, 8) },
-          }), sourceTimeoutMs, 'STM_RETRIEVAL_TIMEOUT', (lateStatus, elapsedMs, errorCode) => {
-            console.warn('[MEMORY_SOURCE_LATE_SETTLEMENT]', JSON.stringify({
-              traceId,
-              source: 'STM',
-              status: lateStatus,
-              elapsedMs,
-              errorCode,
-            }));
-          }).then((result) => {
+            options: { limit: Math.min(normalizedOptions.maxMemories, 8), signal },
+          }), sourceTimeout, timeoutCode || 'STM_RETRIEVAL_TIMEOUT').then((result) => {
             stmMemories = Array.isArray(result?.memories) ? result.memories : [];
             stmLatencyMs = Number(result?.metadata?.latencyMs) || Date.now() - stmStartedAt;
           }).catch((error) => {
@@ -245,33 +283,26 @@ function createMemoryRetrievalAdapter({
           }));
         }
 
-        const structuredRequested = requested.has('LONG_TERM');
-        const semanticRequested = requested.has('SEMANTIC');
-        if (structuredRequested || semanticRequested) {
-          if (structuredRequested) attemptedSources.add('LONG_TERM');
-          if (semanticRequested) attemptedSources.add('SEMANTIC');
-          tasks.push(withSourceTimeout(() => retrieverFactory().retrieve({
+        const runCanonicalSource = (source, includeStructured, includeSemantic) => {
+          attemptedSources.add(source);
+          const canonicalStartedAt = Date.now();
+          return withSourceTimeout((signal) => retrieverFactory().retrieve({
             userId: normalizedUserId,
             query: text,
             options: {
               limit: normalizedOptions.maxMemories,
               historical: Boolean(normalizedOptions.historical || route.reason.historical),
               includeSuperseded: Boolean(normalizedOptions.includeSuperseded || route.reason.historical),
-              includeStructured: structuredRequested,
-              includeSemantic: semanticRequested,
+              includeStructured,
+              includeSemantic,
               traceId,
+              signal,
             },
-          }), sourceTimeoutMs, 'CANONICAL_RETRIEVAL_TIMEOUT', (lateStatus, elapsedMs, errorCode) => {
-            console.warn('[MEMORY_SOURCE_LATE_SETTLEMENT]', JSON.stringify({
-              traceId,
-              source: 'CANONICAL',
-              status: lateStatus,
-              elapsedMs,
-              errorCode,
-            }));
-          }).then((result) => {
-            canonicalResult = result;
-            if (semanticRequested) {
+          }), sourceTimeout, timeoutCode || 'CANONICAL_RETRIEVAL_TIMEOUT').then((result) => {
+            const sourceKey = includeSemantic ? 'semantic' : 'long_term';
+            canonicalResults[sourceKey] = result;
+            canonicalSourceLatencyMs[sourceKey] = Date.now() - canonicalStartedAt;
+            if (includeSemantic) {
               semanticStatus = result?.semantic?.status || 'SEMANTIC_NO_MATCH';
               if (semanticStatus === 'SEMANTIC_INFRASTRUCTURE_FAILURE') {
                 sourceErrors.semantic = result.semantic.errorCode || 'SEMANTIC_INFRASTRUCTURE_FAILURE';
@@ -282,8 +313,15 @@ function createMemoryRetrievalAdapter({
               ...(Array.isArray(result?.memories) ? result.memories : []),
             ];
           }).catch((error) => {
-            sourceErrors.canonical = error?.code || error?.name || 'CANONICAL_RETRIEVAL_FAILURE';
-          }));
+            canonicalSourceLatencyMs[includeSemantic ? 'semantic' : 'long_term'] = Date.now() - canonicalStartedAt;
+            sourceErrors[source.toLowerCase()] = error?.code || error?.name || 'CANONICAL_RETRIEVAL_FAILURE';
+          });
+        };
+        if (requested.has('LONG_TERM')) {
+          tasks.push(runCanonicalSource('LONG_TERM', true, false));
+        }
+        if (requested.has('SEMANTIC')) {
+          tasks.push(runCanonicalSource('SEMANTIC', false, true));
         }
 
         await Promise.all(tasks);
@@ -291,8 +329,17 @@ function createMemoryRetrievalAdapter({
       };
 
       const routeMiss = route.sources.length === 0;
-      if (routeMiss && text && plannerEnabled) {
-        const plan = await planMemoryQuery(text, { traceId });
+      if (routeMiss && text && plannerEnabled && remainingBudgetMs() > 0) {
+        let plan = null;
+        try {
+          plan = await withSourceTimeout(
+            (signal) => planMemoryQuery(text, { traceId, signal }),
+            Math.min(1200, remainingBudgetMs()),
+            'MEMORY_RETRIEVAL_DEADLINE',
+          );
+        } catch {
+          plannerStatus = 'FALLBACK';
+        }
         if (plan && Array.isArray(plan.sources)) {
           plannedSources = plan.sources.filter((source) => ['STM', 'LONG_TERM', 'SEMANTIC'].includes(source));
           plannerStatus = 'VALID';
@@ -316,7 +363,7 @@ function createMemoryRetrievalAdapter({
       let unified = rankResults();
       const allSources = ['STM', 'LONG_TERM', 'SEMANTIC'];
       const fallbackSources = allSources.filter((source) => !attemptedSources.has(source));
-      if (!unified.length && fallbackSources.length) {
+      if (!unified.length && fallbackSources.length && remainingBudgetMs() > 0) {
         fallbackPasses = 1;
         await retrieveSources(fallbackSources);
         unified = rankResults();
@@ -325,32 +372,10 @@ function createMemoryRetrievalAdapter({
       const sourcesUsed = getUsedSources(unified);
       const failures = Object.keys(sourceErrors);
       const retrievalStatus = unified.length
-        ? 'MEMORY_FOUND'
+        ? (failures.length ? 'PARTIAL' : 'MEMORY_FOUND')
         : (!attemptedSources.size
           ? 'NO_ROUTE'
           : (failures.length ? 'SOURCE_ERROR' : 'NO_MATCH'));
-      console.info('[MEMORY_RETRIEVAL_STAGE]', JSON.stringify({
-        traceId,
-        userIdHash: hashIdentifier(normalizedUserId),
-        stage: 'sources_and_ranking',
-        status: retrievalStatus,
-        queryLength: text.length,
-        routing: route.route,
-        routingReason: route.reason,
-        routeMissFallback: routeMiss && Boolean(text),
-        plannerStatus,
-        plannedSources,
-        fallbackPasses,
-        sourcesAttempted: [...attemptedSources],
-        sourcesUsed,
-        sourceFailures: sourceErrors,
-        memoryCount: unified.length,
-        sourceLatencyMs,
-        mergeLatencyMs,
-        canonicalLatency: canonicalResult?.latency || null,
-        totalLatencyMs: Date.now() - startedAt,
-      }));
-
       if (!unified.length && retrievalStatus === 'SOURCE_ERROR') {
         return {
           ...createFailureResult('MEMORY_SOURCE_FAILURE', 'Memory sources could not be reached.'),
@@ -366,8 +391,8 @@ function createMemoryRetrievalAdapter({
             routingReason: route.reason,
             latency: {
               stmLatencyMs,
-              longTermSemanticLatencyMs: canonicalResult?.latency?.totalCanonicalRetrievalLatencyMs || null,
-              semanticLatencyMs: canonicalResult?.latency?.semanticLatencyMs || null,
+              longTermLatencyMs: canonicalSourceLatencyMs.long_term,
+              semanticLatencyMs: canonicalSourceLatencyMs.semantic,
               mergeLatencyMs,
               totalLatencyMs: Date.now() - startedAt,
             },
@@ -391,8 +416,8 @@ function createMemoryRetrievalAdapter({
           sourceFailures: sourceErrors,
           latency: {
             stmLatencyMs,
-            longTermSemanticLatencyMs: canonicalResult?.latency?.totalCanonicalRetrievalLatencyMs || null,
-            semanticLatencyMs: canonicalResult?.latency?.semanticLatencyMs || null,
+            longTermLatencyMs: canonicalSourceLatencyMs.long_term,
+            semanticLatencyMs: canonicalSourceLatencyMs.semantic,
             mergeLatencyMs,
             totalLatencyMs: Date.now() - startedAt,
             sourceLatencyMs,
@@ -402,6 +427,10 @@ function createMemoryRetrievalAdapter({
       }
 
       const context = buildUnifiedContext(unified, normalizedOptions.maxContextLength);
+      const finalRankingLatencyMs = [
+        canonicalResults.long_term,
+        canonicalResults.semantic,
+      ].reduce((total, result) => total + (Number(result?.latency?.finalRankingLatencyMs) || 0), 0) || null;
       return {
         ok: true,
         query: text,
@@ -424,13 +453,16 @@ function createMemoryRetrievalAdapter({
           semanticStatus,
           latency: {
             stmLatencyMs,
-            longTermLatencyMs: canonicalResult?.latency?.structuredRetrievalLatencyMs || null,
-            semanticLatencyMs: canonicalResult?.latency?.semanticLatencyMs || null,
-            embeddingLatencyMs: canonicalResult?.latency?.embeddingLatencyMs || null,
-            pineconeQueryLatencyMs: canonicalResult?.latency?.pineconeQueryLatencyMs || null,
+            longTermLatencyMs: canonicalSourceLatencyMs.long_term,
+            semanticLatencyMs: canonicalSourceLatencyMs.semantic,
+            embeddingLatencyMs: canonicalResults.semantic?.latency?.embeddingLatencyMs || null,
+            pineconeQueryLatencyMs: canonicalResults.semantic?.latency?.pineconeQueryLatencyMs || null,
             mergeLatencyMs,
-            finalRankingLatencyMs: canonicalResult?.latency?.finalRankingLatencyMs || null,
-            totalCanonicalLatencyMs: canonicalResult?.latency?.totalCanonicalRetrievalLatencyMs || null,
+            finalRankingLatencyMs,
+            totalCanonicalLatencyMs: canonicalSourceLatencyMs.long_term === null
+              && canonicalSourceLatencyMs.semantic === null
+              ? null
+              : Math.max(canonicalSourceLatencyMs.long_term || 0, canonicalSourceLatencyMs.semantic || 0),
             totalLatencyMs: Date.now() - startedAt,
           },
           resultSummary: unified.slice(0, 5).map((memory) => safeMemorySummary(memory)).filter(Boolean),

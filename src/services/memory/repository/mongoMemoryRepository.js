@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { env } = require('../../../config/env');
 const MemoryModel = require('../../../models/Memory');
 const { Memory } = require('../domain/Memory');
 const { MemoryRepositoryContract } = require('./memoryRepositoryContract');
@@ -79,7 +80,9 @@ class MongoMemoryRepository extends MemoryRepositoryContract {
   async getById(userId, memoryId) {
     try {
       this._assertConnected();
-      const found = await this.model.findOne({ userId: String(userId || '').trim(), id: String(memoryId || '').trim() }).lean();
+      const found = await this.model.findOne({ userId: String(userId || '').trim(), id: String(memoryId || '').trim() })
+        .maxTimeMS(env.memoryMongoQueryTimeoutMs)
+        .lean();
       if (!found) {
         throw new MemoryNotFoundError(userId, memoryId);
       }
@@ -112,7 +115,7 @@ class MongoMemoryRepository extends MemoryRepositoryContract {
       const docs = await this.model.find({
         userId: normalizedUserId,
         id: { $in: normalizedIds },
-      }).lean();
+      }).maxTimeMS(env.memoryMongoQueryTimeoutMs).lean();
       return docs.map((doc) => MemoryMapper.toDomain(doc));
     } catch (error) {
       if (error instanceof MemoryValidationError) throw error;
@@ -127,6 +130,7 @@ class MongoMemoryRepository extends MemoryRepositoryContract {
       const docs = await this.model.find(query)
         .sort(options.sort || { updatedAt: -1 })
         .limit(options.limit ? Math.max(1, Number(options.limit)) : 0)
+        .maxTimeMS(env.memoryMongoQueryTimeoutMs)
         .lean();
       return docs.map((doc) => MemoryMapper.toDomain(doc));
     } catch (error) {
@@ -143,6 +147,7 @@ class MongoMemoryRepository extends MemoryRepositoryContract {
     const docs = await this.model.find(query)
       .sort(options.sort || { updatedAt: -1 })
       .limit(options.limit ? Math.max(1, Number(options.limit)) : 0)
+      .maxTimeMS(env.memoryMongoQueryTimeoutMs)
       .lean();
     return docs.map((doc) => MemoryMapper.toDomain(doc));
   }
@@ -154,6 +159,7 @@ class MongoMemoryRepository extends MemoryRepositoryContract {
       const docs = await this.model.find(query)
         .sort(options.sort || { updatedAt: -1 })
         .limit(options.limit ? Math.max(1, Number(options.limit)) : 0)
+        .maxTimeMS(env.memoryMongoQueryTimeoutMs)
         .lean();
       return docs.map((doc) => MemoryMapper.toDomain(doc));
     } catch (error) {

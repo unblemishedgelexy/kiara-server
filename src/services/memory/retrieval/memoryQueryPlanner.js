@@ -1,6 +1,6 @@
 'use strict';
 
-const { classifyGroqError, generateText } = require('../../groqService');
+const { generateText } = require('../../groqService');
 
 const ALLOWED_SOURCES = new Set(['STM', 'LONG_TERM', 'SEMANTIC']);
 const ALLOWED_INTENTS = new Set(['RECENT', 'DURABLE', 'SEMANTIC', 'COMBINED']);
@@ -54,20 +54,9 @@ function createMemoryQueryPlanner({
   generateTextFn = generateText,
   timeoutMs = PLANNER_TIMEOUT_MS,
 } = {}) {
-  return async function planMemoryQuery(query, { traceId = 'untraced' } = {}) {
+  return async function planMemoryQuery(query) {
     const text = String(query || '').trim().slice(0, MAX_QUERY_LENGTH);
-    const startedAt = Date.now();
     if (!isPlannerEligibleQuery(text)) {
-      console.info('[MEMORY_QUERY_PLANNER]', JSON.stringify({
-        traceId,
-        invoked: false,
-        responseReceived: false,
-        providerOutcome: 'NOT_CALLED',
-        validationResult: 'NOT_RUN',
-        acceptedSources: [],
-        elapsedMs: Date.now() - startedAt,
-        fallbackReason: text ? 'QUERY_NOT_ELIGIBLE' : 'EMPTY_QUERY',
-      }));
       return null;
     }
 
@@ -94,29 +83,6 @@ function createMemoryQueryPlanner({
       ]);
     } catch (error) {
       if (timeout) clearTimeout(timeout);
-      const provider = error?.code === 'QUERY_PLANNER_TIMEOUT'
-        ? {
-          category: 'PLANNER_TIMEOUT',
-          httpStatus: null,
-          providerCode: null,
-          providerType: null,
-          requestId: null,
-          errorName: null,
-        }
-        : classifyGroqError(error);
-      console.warn('[MEMORY_QUERY_PLANNER]', JSON.stringify({
-        traceId,
-        invoked: true,
-        responseReceived: false,
-        providerOutcome: provider.category,
-        validationResult: 'NOT_RUN',
-        elapsedMs: Date.now() - startedAt,
-        ...provider,
-        acceptedSources: [],
-        fallbackReason: provider.category === 'PLANNER_TIMEOUT' || provider.category === 'NETWORK_TIMEOUT'
-          ? 'PROVIDER_TIMEOUT'
-          : 'PROVIDER_FAILURE',
-      }));
       return null;
     }
 
@@ -125,32 +91,10 @@ function createMemoryQueryPlanner({
     try {
       parsed = JSON.parse(responseText);
     } catch {
-      console.warn('[MEMORY_QUERY_PLANNER]', JSON.stringify({
-        traceId,
-        invoked: true,
-        providerOutcome: 'SUCCESS',
-        responseReceived: true,
-        validationResult: 'INVALID_JSON',
-        elapsedMs: Date.now() - startedAt,
-        acceptedSources: [],
-        fallbackReason: 'RESPONSE_NOT_JSON',
-      }));
       return null;
     }
 
-    const plan = validatePlan(parsed);
-    console.info('[MEMORY_QUERY_PLANNER]', JSON.stringify({
-      traceId,
-      invoked: true,
-      providerOutcome: 'SUCCESS',
-      responseReceived: true,
-      validationResult: plan ? 'VALID' : 'INVALID',
-      elapsedMs: Date.now() - startedAt,
-      acceptedIntent: plan?.intent || null,
-      acceptedSources: plan?.sources || [],
-      fallbackReason: plan ? null : 'SCHEMA_VALIDATION_FAILED',
-    }));
-    return plan;
+    return validatePlan(parsed);
   };
 }
 

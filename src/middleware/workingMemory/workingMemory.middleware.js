@@ -78,10 +78,12 @@ class WorkingMemoryMiddleware {
       }
 
       if (!require('../../config/env').env.liveMemoryEnabled) {
-        return res.status(200).json({
-          success: true,
+        return res.status(503).json({
+          success: false,
           skipped: true,
           reason: 'memory_disabled_for_live_stability',
+          code: 'MEMORY_DISABLED',
+          message: 'Working memory is currently unavailable.',
           enabled: false,
           timestamp: new Date().toISOString(),
         });

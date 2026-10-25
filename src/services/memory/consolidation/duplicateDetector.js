@@ -51,6 +51,12 @@ function detectDuplicate(existingMemory = {}, candidate = {}) {
     return false;
   }
 
+  const normalizedExistingContent = normalizeText(existingMemory.content || '');
+  if (normalizedExistingContent
+    && normalizedExistingContent === normalizeText(candidate.content || '')) {
+    return true;
+  }
+
   if (sameCanonicalFields(existingMemory, candidate)) {
     return true;
   }
@@ -58,11 +64,6 @@ function detectDuplicate(existingMemory = {}, candidate = {}) {
   const sameType = (existingMemory.type || '').toLowerCase() === (candidate.type || '').toLowerCase();
   if (!sameType) {
     return false;
-  }
-
-  if (normalizeText(existingMemory.content || '')
-    && normalizeText(existingMemory.content || '') === normalizeText(candidate.content || '')) {
-    return true;
   }
 
   if ((existingMemory.type || '').toLowerCase() === 'project' || (candidate.type || '').toLowerCase() === 'project') {

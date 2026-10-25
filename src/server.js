@@ -1,53 +1,58 @@
 const createApp = require('./app');
 const connectDB = require('./db/connect');
-const { env } = require('./config/env');
+const { env, validateProductionConfig } = require('./config/env');
 const promotionWorker = require('./services/memory/promotion/promotionWorker');
 const WorkingMemoryRedis = require('./services/workingMemory/redisOperations');
 const { ensureSubscriptionIndexes } = require('./services/subscriptions/subscriptionIndexes');
 const MemoryService = require('./services/memory');
 const redisService = require('./services/infrastructure/redisService');
 const mongoose = require('mongoose');
+const accountDeletionService = require('./services/accountDeletionService');
 
 async function startServer() {
+  validateProductionConfig();
   const dbConnected = await connectDB();
 
   if (!dbConnected) {
-    console.error('[ERROR]', 'Proceeding without MongoDB. Profile and auth routes may be unavailable.');
+    console.error('[STARTUP_DEPENDENCY_UNAVAILABLE]', 'mongodb');
   } else {
     await ensureSubscriptionIndexes();
   }
 
+  try {
+    await redisService.initRedis();
+  } catch (error) {
+    console.error('[STARTUP_DEPENDENCY_UNAVAILABLE]', 'redis', error?.code || error?.name || 'connection_failed');
+  }
+
   const memoryEnabled = Boolean(env.liveMemoryEnabled);
   const promotionWorkerEnabled = memoryEnabled && env.enablePinecone && env.enablePromotionWorker;
-
-  console.log('[MEMORY_SYSTEM]', JSON.stringify({
-    enabled: memoryEnabled,
-    mode: memoryEnabled ? 'enabled' : 'disabled-during-live-stability',
-    promotionWorkerEnabled,
-    timestamp: new Date().toISOString(),
-  }));
 
   if (promotionWorkerEnabled) {
     promotionWorker.startPromotionWorker();
   }
 
   WorkingMemoryRedis.startRejectedMemoryCleanupScheduler();
-
-  console.log('[SERVER_START]', 'Server ready.');
+  accountDeletionService.startAccountDeletionWorker();
 
   const app = createApp();
   const port = env.port || 4000;
 
-  const server = app.listen(port, () => {
-    console.log('[SERVER_START]', `http://localhost:${port}`);
-  });
+  const server = app.listen(port);
   server.requestTimeout = 15 * 60 * 1000;
+  server.once('listening', () => {
+    const address = server.address();
+    const listenUrl = address && typeof address === 'object'
+      ? `http://localhost:${address.port}`
+      : `http://localhost:${port}`;
+    console.log('[SERVER]', 'Server started');
+    console.log('[SERVER]', `Listening at ${listenUrl}`);
+  });
 
   let shutdownPromise = null;
   const shutdown = (signal) => {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
-      console.info('[SERVER_SHUTDOWN]', JSON.stringify({ signal }));
       const forceExit = setTimeout(() => {
         console.error('[SERVER_SHUTDOWN]', 'Graceful shutdown timed out.');
         process.exit(1);
@@ -55,6 +60,7 @@ async function startServer() {
 
       promotionWorker.stopPromotionWorker();
       WorkingMemoryRedis.stopRejectedMemoryCleanupScheduler();
+      accountDeletionService.stopAccountDeletionWorker();
 
       const serverClosed = new Promise((resolve) => server.close(resolve));
       const memoryDrain = MemoryService.drainCanonicalWriteJobs(8000);
@@ -85,6 +91,6 @@ async function startServer() {
 }
 
 startServer().catch((error) => {
-  console.error('[ERROR]', 'Failed to start server:', error instanceof Error ? error.message : error);
+  console.error('[STARTUP_FAILED]', error?.name || error?.code || 'StartupError');
   process.exit(1);
 });

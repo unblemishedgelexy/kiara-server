@@ -27,3 +27,14 @@ test('keeps conversational style guidance from overriding direct factual answers
     /When the user asks a direct factual question, answer it accurately using relevant current authenticated context/i,
   );
 });
+
+test('instructs Kiara to emit a talk gesture for ordinary spoken replies', () => {
+  assert.match(
+    GEMINI_LIVE_SYSTEM_INSTRUCTION,
+    /"gesture" field controls the avatar's body animation/i,
+  );
+  assert.match(
+    GEMINI_LIVE_SYSTEM_INSTRUCTION,
+    /Use "talk" for ordinary spoken replies/i,
+  );
+});

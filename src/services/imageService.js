@@ -27,4 +27,9 @@ async function uploadFileToImageKit(filePath, fileName) {
   return res;
 }
 
-module.exports = { uploadFileToImageKit };
+async function deleteFileFromImageKit(fileId) {
+  if (!fileId) return;
+  await imagekit.files.delete(fileId);
+}
+
+module.exports = { uploadFileToImageKit, deleteFileFromImageKit };

@@ -18,8 +18,6 @@ const UserModel = require('../models/User');
 async function register(req, res, next) {
   try {
     const { firstName, lastName, email, password, mobileNumber } = req.body;
-    console.log('Registration request:', { firstName, lastName, email, mobileNumber });
-
     const result = await authServiceV2.registerUser({
       firstName,
       lastName,
@@ -30,8 +28,8 @@ async function register(req, res, next) {
 
     res.status(201).json(result);
   } catch (error) {
-    console.error('Registration error:', error.message);
-    const statusCode = error.message.includes('already') ? 400 : 400;
+    console.error('[AUTH_V2_REGISTER_FAILED]', error?.name || error?.code || 'AuthError');
+    const statusCode = error.message.includes('already') ? 400 : 503;
     res.status(statusCode).json({
       success: false,
       message: error.message || 'Registration failed.',
@@ -55,7 +53,7 @@ async function login(req, res, next) {
       refreshToken: result.refreshToken,
     });
   } catch (error) {
-    console.error('Login error:', error.message);
+    console.error('[AUTH_V2_LOGIN_FAILED]', error?.name || error?.code || 'AuthError');
     const statusCode = error.message.includes('locked') ? 429 : 400;
     res.status(statusCode).json({
       success: false,
@@ -81,7 +79,7 @@ async function forgotPassword(req, res, next) {
 
     res.json(result);
   } catch (error) {
-    console.error('Forgot password error:', error.message);
+    console.error('[AUTH_V2_RESET_REQUEST_FAILED]', error?.name || error?.code || 'AuthError');
     res.status(500).json({
       success: false,
       message: 'Failed to process password reset request. Please try again.',
@@ -109,7 +107,7 @@ async function verifyOTPAndResetPassword(req, res, next) {
 
     res.json(result);
   } catch (error) {
-    console.error('OTP verification error:', error.message);
+    console.error('[AUTH_V2_OTP_RESET_FAILED]', error?.name || error?.code || 'AuthError');
     const statusCode = error.message.includes('locked') ? 429 : 400;
     res.status(statusCode).json({
       success: false,
@@ -139,8 +137,8 @@ async function requestEmailVerificationOTP(req, res, next) {
 
     res.json(result);
   } catch (error) {
-    console.error('Email verification OTP request error:', error.message);
-    res.status(400).json({
+    console.error('[PROFILE_EMAIL_OTP_REQUEST_FAILED]', error?.name || error?.code || 'AuthError');
+    res.status(error.code === 'OTP_RATE_LIMITED' ? 429 : error.code === 'OTP_DELIVERY_FAILED' || error.code === 'REDIS_UNAVAILABLE' ? 503 : 400).json({
       success: false,
       message: error.message || 'Failed to send verification OTP.',
     });
@@ -175,7 +173,7 @@ async function verifyEmailOTPFromProfile(req, res, next) {
 
     res.json(result);
   } catch (error) {
-    console.error('Profile email verification error:', error.message);
+    console.error('[PROFILE_EMAIL_VERIFICATION_FAILED]', error?.name || error?.code || 'AuthError');
     const statusCode = error.message.includes('locked') ? 429 : 400;
     res.status(statusCode).json({
       success: false,
@@ -205,13 +203,11 @@ async function getVerificationStatus(req, res, next) {
 
     res.json({
       success: true,
-      isVerified: user.isVerified,
-      verifiedAt: user.verifiedAt,
-      verificationMethod: user.verificationMethod,
+      emailVerified: user.emailVerified,
       email: user.email,
     });
   } catch (error) {
-    console.error('Verification status error:', error.message);
+    console.error('[AUTH_V2_VERIFICATION_STATUS_FAILED]', error?.name || error?.code || 'AuthError');
     res.status(500).json({
       success: false,
       message: 'Failed to get verification status.',

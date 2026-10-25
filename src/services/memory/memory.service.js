@@ -1,4 +1,5 @@
 'use strict';
+const { createHash } = require('node:crypto');
 
 /**
  * ╔══════════════════════════════════════════════════════════════════╗
@@ -37,7 +38,6 @@ const { env } = require('../../config/env');
 
 // ── Private sub-modules ─────────────────────────────────────────────
 const promptBuilder   = require('./retrieval/promptBuilder');
-const { prepareLongTermMemory } = require('./longTermHandoff');
 const pineconeService = require('../pineconeService');
 const { computeEmbedding } = require('../../utils/memory/memoryUtils');
 const retriever = require('./retrieval/retriever');
@@ -51,113 +51,7 @@ const { INFRASTRUCTURE_FAILURES } = require('./application/memoryWriteAdapterCon
 // ── Config ─────────────────────────────────────────────────────────
 const DEFAULT_TTL           = env.shortTermMemoryTTL;          // 25 minutes for conversation turns
 // Retrieval is now driven by a time window rather than a fixed turn count.
-const SNAPSHOT_INTERVAL_MS  = 15 * 60 * 1000; // 15 minutes
-const IDLE_TIMEOUT_MS       = 22 * 60 * 1000; // 22 minutes
-
-const stmSessionStates = new Map();
 const canonicalWriteJobs = new Map();
-
-function _makeSessionKey(userId, sessionId) {
-  return `${userId}:${sessionId}`;
-}
-
-function _clearHandoffTimers(sessionKey) {
-  const state = stmSessionStates.get(sessionKey);
-  if (!state) return;
-  if (state.snapshotTimer) {
-    clearTimeout(state.snapshotTimer);
-  }
-  if (state.idleTimer) {
-    clearTimeout(state.idleTimer);
-  }
-  stmSessionStates.delete(sessionKey);
-}
-
-function _scheduleSnapshot(sessionKey) {
-  const state = stmSessionStates.get(sessionKey);
-  if (!state) return;
-  if (state.snapshotTimer) {
-    clearTimeout(state.snapshotTimer);
-  }
-  state.snapshotTimer = setTimeout(async () => {
-    try {
-      await _handleSnapshotTimer(sessionKey);
-    } catch (err) {
-    }
-  }, SNAPSHOT_INTERVAL_MS);
-}
-
-function _resetIdleTimer(sessionKey) {
-  const state = stmSessionStates.get(sessionKey);
-  if (!state) return;
-  if (state.idleTimer) {
-    clearTimeout(state.idleTimer);
-  }
-  state.idleTimer = setTimeout(async () => {
-    try {
-      await _handleIdleTimer(sessionKey);
-    } catch (err) {
-    }
-  }, IDLE_TIMEOUT_MS);
-}
-
-function _startSessionState(userId, sessionId) {
-  const sessionKey = _makeSessionKey(userId, sessionId);
-  _clearHandoffTimers(sessionKey);
-
-  const state = {
-    userId,
-    sessionId,
-    startedAt: new Date().toISOString(),
-    lastActivityAt: Date.now(),
-    snapshotTimer: null,
-    idleTimer: null,
-  };
-
-  stmSessionStates.set(sessionKey, state);
-  _scheduleSnapshot(sessionKey);
-  _resetIdleTimer(sessionKey);
-}
-
-function _refreshSessionState(userId, sessionId) {
-  const sessionKey = _makeSessionKey(userId, sessionId);
-  const state = stmSessionStates.get(sessionKey);
-  if (!state) {
-    _startSessionState(userId, sessionId);
-    return;
-  }
-  state.lastActivityAt = Date.now();
-  _resetIdleTimer(sessionKey);
-}
-
-function _buildStmSnapshot(sessionId, turns) {
-  const conversationId = sessionId;
-  const conversationStartTime = turns.length ? turns[0].timestamp : new Date().toISOString();
-  const conversationEndTime = turns.length ? turns[turns.length - 1].timestamp : conversationStartTime;
-  const userMessages = turns.map((turn) => turn.userMessage);
-  const assistantMessages = turns.map((turn) => turn.assistantResponse || turn.aiResponse || turn.assistantMessage || '');
-  const timestamps = turns.map((turn) => turn.timestamp);
-  const characterCount = turns.reduce((total, turn) => {
-    const userLen = String(turn.userMessage || '').length;
-    const assistantLen = String(turn.assistantResponse || turn.aiResponse || turn.assistantMessage || '').length;
-    return total + userLen + assistantLen;
-  }, 0);
-  const estimatedTokens = Math.ceil(characterCount / 4);
-
-  return {
-    sessionId,
-    conversationId,
-    conversationStartTime,
-    conversationEndTime,
-    turnCount: turns.length,
-    userMessages,
-    assistantMessages,
-    timestamps,
-    characterCount,
-    estimatedTokens,
-    rawConversation: turns,
-  };
-}
 
 function _compareShadowRetrieval(oldResult = {}, canonicalResult = {}) {
   const oldMemories = Array.isArray(oldResult.allMemories) ? oldResult.allMemories : [];
@@ -221,40 +115,35 @@ function buildContextFromLegacyResult(result = {}) {
     return buildSafeEmptyMemoryContext();
   }
 
+  const facts = Array.isArray(result.allMemories) ? result.allMemories : [];
+  const systemPrompt = String(result.context || '');
   return {
-    systemPrompt: result.context || '',
-    facts: result.allMemories || [],
+    systemPrompt,
+    facts,
     task: null,
     turnCount: result.retrievedMemoriesCount || 0,
     contextPacket: result.contextPacket || null,
     memoryRevision: result.memoryRevision || 0,
     contextMemoryRevision: result.contextMemoryRevision || result.memoryRevision || 0,
     source: result.source || 'legacy',
+    memoryContextIncluded: facts.length > 0 && Boolean(systemPrompt.trim()),
     ok: true,
   };
 }
 
-async function loadAuthenticatedIdentity(userId, traceId = 'untraced') {
+async function loadAuthenticatedIdentity(userId) {
   const startedAt = Date.now();
   try {
-    const user = await UserModel.findById(userId).select('firstName lastName displayName').lean();
+    const user = await UserModel.findById(userId)
+      .select('firstName lastName displayName')
+      .maxTimeMS(env.memoryMongoQueryTimeoutMs)
+      .lean();
     const fullName = [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() || user?.displayName || '';
     const status = fullName ? 'AVAILABLE' : (user ? 'NO_PROFILE_NAME' : 'PROFILE_NOT_FOUND');
-    console.info('[MEMORY_IDENTITY_LOOKUP]', JSON.stringify({
-      traceId,
-      status,
-      elapsedMs: Date.now() - startedAt,
-    }));
     return { fullName, status, elapsedMs: Date.now() - startedAt };
   } catch (error) {
     const lookupError = new Error('Authoritative user profile lookup failed.');
     lookupError.code = 'USER_PROFILE_LOOKUP_FAILED';
-    console.warn('[MEMORY_IDENTITY_LOOKUP]', JSON.stringify({
-      traceId,
-      status: 'failure',
-      failureCode: error?.code || error?.name || 'USER_PROFILE_LOOKUP_FAILED',
-      elapsedMs: Date.now() - startedAt,
-    }));
     throw lookupError;
   }
 }
@@ -296,9 +185,13 @@ function buildContextFromCanonicalResult(canonical = {}) {
     source: canonical.source || 'canonical',
     memoryStatus: canonical.ok === false
       ? 'RETRIEVAL_FAILURE'
-      : (memories.length ? 'MEMORY_FOUND' : 'NO_MEMORY'),
+      : (canonical.metadata?.status === 'PARTIAL'
+        ? 'PARTIAL'
+        : (memories.length ? 'MEMORY_FOUND' : 'NO_MEMORY')),
+    memoryContextIncluded: memories.length > 0 && Boolean(String(canonical.context || '').trim()),
     retrievalMetadata: canonical.metadata || null,
-    errorCode: canonical.error?.code || null,
+    errorCode: canonical.error?.code
+      || (canonical.metadata?.status === 'PARTIAL' ? 'PARTIAL_MEMORY_SOURCE_FAILURE' : null),
     ok: canonical.ok !== false,
   };
 }
@@ -421,34 +314,6 @@ async function _assembleContext(userId, { identity, goal, project, workingTurns,
   return { systemPrompt, facts: semantic, task: goal || null, turnCount: recentTurns.length };
 }
 
-async function _dispatchSnapshot(userId, sessionId) {
-  const turns = await WorkingMemoryRedis.getRecentMemory(userId);
-  if (!turns || turns.length === 0) {
-    return null;
-  }
-  const snapshot = _buildStmSnapshot(sessionId, turns);
-  prepareLongTermMemory(snapshot);
-  return snapshot;
-}
-
-async function _handleSnapshotTimer(sessionKey) {
-  const state = stmSessionStates.get(sessionKey);
-  if (!state) return;
-  const idleAgo = Date.now() - state.lastActivityAt;
-  if (idleAgo >= IDLE_TIMEOUT_MS) {
-    return;
-  }
-  await _dispatchSnapshot(state.userId, state.sessionId);
-  _scheduleSnapshot(sessionKey);
-}
-
-async function _handleIdleTimer(sessionKey) {
-  const state = stmSessionStates.get(sessionKey);
-  if (!state) return;
-  await _dispatchSnapshot(state.userId, state.sessionId);
-  _clearHandoffTimers(sessionKey);
-}
-
 // ───────────────────────────────────────────────────────────────────
 // PRIVATE: input validation
 // ───────────────────────────────────────────────────────────────────
@@ -530,32 +395,70 @@ function resolveCanonicalWriteMode() {
     : 'legacy';
 }
 
-function logCanonicalWrite(mode, result) {
-  const metadata = result?.metadata || {};
-  const diagnostic = {
+function logMemoryWriteFailure(mode, status, code, category, details = {}) {
+  const diagnostics = details.extractionDiagnostics || {};
+  const safeName = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value)
+    ? value
+    : undefined;
+  const turnId = typeof details.turnId === 'string' && details.turnId
+    ? createHash('sha256').update(details.turnId).digest('hex').slice(0, 16)
+    : undefined;
+  const failureStage = status === 'EXTRACTION_FAILURE' && diagnostics.stage
+    ? diagnostics.stage
+    : (details.writeStage
+      || diagnostics.stage
+      || (status === 'MONGO_FAILURE' ? 'canonical_persistence' : 'extraction'));
+  console.error('[MEMORY_WRITE_FAILURE]', JSON.stringify({
     mode,
-    turnId: metadata.turnId || null,
-    status: result?.status || 'EXTRACTION_FAILURE',
-    extractionDecision: metadata.extractionDecision || 'UNAVAILABLE',
-    extractionFailureCode: metadata.extractionFailureCode || null,
-    consolidationDecisions: Array.isArray(metadata.decisions)
-      ? metadata.decisions.map((item) => item.decision).slice(0, 12)
-      : [],
-    mongoStatus: metadata.mongoStatus || 'NOT_ATTEMPTED',
-    cacheStatus: metadata.cacheStatus || 'NOT_ATTEMPTED',
-    semanticIndexStatus: metadata.semanticIndexStatus || 'NOT_ATTEMPTED',
-    savedCount: Array.isArray(result?.memories) ? result.memories.length : 0,
-    failureCategory: result?.error?.code || null,
-    latency: metadata.latency || {},
-  };
-
-  if (result?.status === 'EXTRACTION_FAILURE'
-    || result?.status === 'CONSOLIDATION_FAILURE'
-    || result?.status === 'MONGO_FAILURE') {
-    console.warn('[MEMORY_CANONICAL_WRITE]', JSON.stringify(diagnostic));
-  } else {
-    console.info('[MEMORY_CANONICAL_WRITE]', JSON.stringify(diagnostic));
-  }
+    status,
+    code: code || status,
+    ...(category ? { category } : {}),
+    ...(turnId ? { correlationId: turnId } : {}),
+    failureStage,
+    ...(details.writeStage ? { writeStage: details.writeStage } : {}),
+    ...(typeof details.extractionDecision === 'string'
+      ? { extractionDecision: details.extractionDecision }
+      : {}),
+    ...(typeof details.validationFailureCode === 'string'
+      ? { validationFailureCode: details.validationFailureCode }
+      : {}),
+    ...(diagnostics.stage ? { extractionStage: diagnostics.stage } : {}),
+    ...(safeName(diagnostics.providerOperation) ? { providerOperation: diagnostics.providerOperation } : {}),
+    ...(safeName(diagnostics.errorClass || details.errorClass)
+      ? { errorClass: diagnostics.errorClass || details.errorClass }
+      : {}),
+    ...(safeName(diagnostics.providerCategory) ? { providerCategory: diagnostics.providerCategory } : {}),
+    ...(safeName(diagnostics.providerRequestId) ? { providerRequestId: diagnostics.providerRequestId } : {}),
+    ...(Number.isInteger(diagnostics.providerStatus) ? { providerStatus: diagnostics.providerStatus } : {}),
+    inputPresent: details.inputPresent === true,
+    ...(typeof diagnostics.responseContentPresent === 'boolean'
+      ? { responseContentPresent: diagnostics.responseContentPresent }
+      : {}),
+    ...(typeof diagnostics.parsingSucceeded === 'boolean'
+      ? { parsingSucceeded: diagnostics.parsingSucceeded }
+      : {}),
+    ...(typeof diagnostics.validationSucceeded === 'boolean'
+      ? { validationSucceeded: diagnostics.validationSucceeded }
+      : {}),
+    ...(Number.isInteger(details.retryCount) ? { retryCount: details.retryCount } : {}),
+    ...(Number.isFinite(details.durationMs) ? { durationMs: details.durationMs } : {}),
+    ...(Number.isFinite(details.extractionDurationMs)
+      ? { extractionDurationMs: details.extractionDurationMs }
+      : {}),
+    ...(Number.isInteger(details.candidateCount) ? { candidateCount: details.candidateCount } : {}),
+    ...(Array.isArray(details.decisions)
+      ? { canonicalDecisions: details.decisions.map(({ decision, code }) => ({ decision, ...(code ? { code } : {}) })) }
+      : {}),
+    ...(typeof details.persistenceAttempted === 'boolean'
+      ? { persistenceAttempted: details.persistenceAttempted }
+      : {}),
+    ...(typeof details.mongoAcknowledged === 'boolean' || details.mongoAcknowledged === null
+      ? { mongoAcknowledged: details.mongoAcknowledged }
+      : {}),
+    ...(typeof details.mongoStatus === 'string' ? { mongoStatus: details.mongoStatus } : {}),
+    timedOut: code === 'NETWORK_TIMEOUT',
+    persistenceConfirmed: false,
+  }));
 }
 
 function scheduleCanonicalWrite({
@@ -587,7 +490,28 @@ function scheduleCanonicalWrite({
         },
       }))
     .then(async (result) => {
-      logCanonicalWrite(mode, result);
+      if (['EXTRACTION_FAILURE', 'CONSOLIDATION_FAILURE', 'MONGO_FAILURE'].includes(result?.status)) {
+        logMemoryWriteFailure(
+          mode,
+          result.status,
+          result?.metadata?.extractionFailureCode || result?.error?.code,
+          result?.metadata?.extractionFailureCategory,
+          {
+            turnId,
+            inputPresent: true,
+            extractionDiagnostics: result?.metadata?.extractionDiagnostics,
+            extractionDecision: result?.metadata?.extractionDecision,
+            writeStage: result?.metadata?.writeStage,
+            candidateCount: result?.metadata?.candidateCount,
+            decisions: result?.metadata?.decisions,
+            persistenceAttempted: result?.metadata?.persistenceAttempted,
+            mongoAcknowledged: result?.metadata?.mongoAcknowledged,
+            mongoStatus: result?.metadata?.mongoStatus,
+            durationMs: result?.metadata?.latency?.totalLatencyMs,
+            extractionDurationMs: result?.metadata?.latency?.extractionLatencyMs,
+          },
+        );
+      }
       if (mode === 'canonical_with_legacy_fallback'
         && INFRASTRUCTURE_FAILURES.has(result?.status)) {
         const legacyResult = await _runBackgroundExtraction(
@@ -597,22 +521,17 @@ function scheduleCanonicalWrite({
           aiResponse,
           turnId,
         );
-        console.info('[MEMORY_LEGACY_WRITE_FALLBACK]', JSON.stringify({
-          mode,
-          status: legacyResult?.status || 'STORAGE_FAILURE',
-          saved: Boolean(legacyResult?.saved),
-          count: Number(legacyResult?.count) || 0,
-          failureCategory: result.status,
-        }));
+        if (INFRASTRUCTURE_FAILURES.has(legacyResult?.status)) {
+          logMemoryWriteFailure(mode, legacyResult?.status || 'STORAGE_FAILURE', result.status);
+        }
       }
     })
-    .catch(async () => {
-        const failed = {
-          status: 'EXTRACTION_FAILURE',
-          error: { code: 'EXTRACTION_FAILURE' },
-          metadata: { extractionDecision: 'THREW' },
-        };
-        logCanonicalWrite(mode, failed);
+    .catch(async (error) => {
+        logMemoryWriteFailure(mode, 'EXTRACTION_FAILURE', 'MEMORY_WRITE_JOB_FAILURE', 'INFRASTRUCTURE', {
+          turnId,
+          inputPresent: true,
+          errorClass: error?.name,
+        });
         if (mode === 'canonical_with_legacy_fallback') {
           try {
             const legacyResult = await _runBackgroundExtraction(
@@ -622,18 +541,12 @@ function scheduleCanonicalWrite({
               aiResponse,
               turnId,
             );
-            console.info('[MEMORY_LEGACY_WRITE_FALLBACK]', JSON.stringify({
-              mode,
-              status: legacyResult?.status || 'STORAGE_FAILURE',
-              saved: Boolean(legacyResult?.saved),
-              count: Number(legacyResult?.count) || 0,
-              failureCategory: 'EXTRACTION_FAILURE',
-            }));
+            if (INFRASTRUCTURE_FAILURES.has(legacyResult?.status)) {
+              logMemoryWriteFailure(mode, legacyResult?.status || 'STORAGE_FAILURE', 'LEGACY_WRITE_FAILURE');
+            }
           } catch {
-            console.warn('[MEMORY_LEGACY_WRITE_FALLBACK]', JSON.stringify({
-              mode,
-              status: 'STORAGE_FAILURE',
-              failureCategory: 'LEGACY_WRITE_FAILURE',
+            console.error('[MEMORY_WRITE_FAILURE]', JSON.stringify({
+              code: 'LEGACY_WRITE_FAILURE',
             }));
           }
         }
@@ -724,14 +637,6 @@ const MemoryService = {
         return result;
       }
       const saveDurationMs = Date.now() - saveStartedAt;
-
-
-      const sessionKey = _makeSessionKey(userId, sessionId);
-      if (!stmSessionStates.has(sessionKey)) {
-        _startSessionState(userId, sessionId);
-      } else {
-        _refreshSessionState(userId, sessionId);
-      }
 
 
       const mode = resolveCanonicalWriteMode();
@@ -1093,7 +998,7 @@ const MemoryService = {
 
     let identity;
     try {
-      identity = await loadAuthenticatedIdentity(userId, String(opts.traceId || 'untraced'));
+      identity = await loadAuthenticatedIdentity(userId);
     } catch (error) {
       return {
         ...buildFailedMemoryContext(error),
@@ -1117,6 +1022,10 @@ const MemoryService = {
         maxMemories: 6,
         maxContextLength: 1800,
         traceId: String(opts.traceId || 'untraced'),
+        ...(isLiveContext ? {
+          sourceTimeoutMs: env.liveMemoryRetrievalTimeoutMs,
+          retrievalTimeoutMs: env.liveMemoryRetrievalTimeoutMs,
+        } : {}),
       };
 
       if (mode === 'legacy') {

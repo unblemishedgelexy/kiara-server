@@ -21,6 +21,111 @@ test('free entitlement meters usage without enforcing a paid limit', () => {
   assert.deepEqual(calculateLiveCharge(30, 120, null), { billedSeconds: 30, limitReached: false });
 });
 
+test('paid chat quota is checked atomically against completed and pending messages', async () => {
+  const usageId = new mongoose.Types.ObjectId();
+  const usage = {
+    _id: usageId,
+    userId: 'user-2',
+    periodStart: getUtcBillingPeriod().periodStart,
+    periodEnd: getUtcBillingPeriod().periodEnd,
+    chatMessages: 300,
+    pendingChatReservations: [],
+    activeLiveSessions: [],
+  };
+  const originals = {
+    subscriptionFindOne: Subscription.findOne,
+    usageFindOneAndUpdate: SubscriptionUsage.findOneAndUpdate,
+    usageUpdateOne: SubscriptionUsage.updateOne,
+    usageFindById: SubscriptionUsage.findById,
+  };
+
+  try {
+    Subscription.findOne = () => ({
+      sort: () => ({
+        lean: async () => ({
+          userId: 'user-2',
+          planId: 'starter',
+          status: 'active',
+          expiresAt: new Date(Date.now() + 60_000),
+        }),
+      }),
+    });
+    SubscriptionUsage.findOneAndUpdate = async (_filter, update) => (
+      update.$setOnInsert ? usage : null
+    );
+    SubscriptionUsage.updateOne = async () => ({ modifiedCount: 0 });
+    SubscriptionUsage.findById = () => ({ lean: async () => usage });
+
+    await assert.rejects(
+      usageService.reserveChatMessage('user-2'),
+      (error) => {
+        assert.equal(error.code, 'CHAT_QUOTA_EXCEEDED');
+        assert.equal(error.statusCode, 402);
+        assert.equal(error.details.usage, 300);
+        assert.equal(error.details.limit, 300);
+        return true;
+      },
+    );
+  } finally {
+    Subscription.findOne = originals.subscriptionFindOne;
+    SubscriptionUsage.findOneAndUpdate = originals.usageFindOneAndUpdate;
+    SubscriptionUsage.updateOne = originals.usageUpdateOne;
+    SubscriptionUsage.findById = originals.usageFindById;
+  }
+});
+
+test('paid live quota blocks new sessions at the plan boundary', async () => {
+  const usageId = new mongoose.Types.ObjectId();
+  const usage = {
+    _id: usageId,
+    userId: 'user-3',
+    periodStart: getUtcBillingPeriod().periodStart,
+    periodEnd: getUtcBillingPeriod().periodEnd,
+    liveSeconds: 3600,
+    chatMessages: 0,
+    activeLiveSessions: [],
+  };
+  const originals = {
+    subscriptionFindOne: Subscription.findOne,
+    usageFindOneAndUpdate: SubscriptionUsage.findOneAndUpdate,
+    usageUpdateOne: SubscriptionUsage.updateOne,
+    usageFindById: SubscriptionUsage.findById,
+  };
+
+  try {
+    Subscription.findOne = () => ({
+      sort: () => ({
+        lean: async () => ({
+          userId: 'user-3',
+          planId: 'starter',
+          status: 'active',
+          expiresAt: new Date(Date.now() + 60_000),
+        }),
+      }),
+    });
+    SubscriptionUsage.findOneAndUpdate = async (_filter, update) => (
+      update.$setOnInsert ? usage : null
+    );
+    SubscriptionUsage.updateOne = async () => ({ modifiedCount: 0 });
+    SubscriptionUsage.findById = () => ({ lean: async () => usage });
+
+    await assert.rejects(
+      usageService.startLiveSession('user-3'),
+      (error) => {
+        assert.equal(error.code, 'LIVE_QUOTA_EXCEEDED');
+        assert.equal(error.statusCode, 402);
+        assert.equal(error.details.limitSeconds, 3600);
+        return true;
+      },
+    );
+  } finally {
+    Subscription.findOne = originals.subscriptionFindOne;
+    SubscriptionUsage.findOneAndUpdate = originals.usageFindOneAndUpdate;
+    SubscriptionUsage.updateOne = originals.usageUpdateOne;
+    SubscriptionUsage.findById = originals.usageFindById;
+  }
+});
+
 test('billing periods use UTC month boundaries', () => {
   const { periodStart, periodEnd } = getUtcBillingPeriod(new Date('2026-09-27T19:00:00.000Z'));
   assert.equal(periodStart.toISOString(), '2026-09-01T00:00:00.000Z');
@@ -50,6 +155,7 @@ test('clears stale live sessions before creating the next one', async () => {
   const originalUsageFindOne = SubscriptionUsage.findOne;
   const originalUsageFindOneAndUpdate = SubscriptionUsage.findOneAndUpdate;
   const originalUsageUpdateOne = SubscriptionUsage.updateOne;
+  const originalUsageFindById = SubscriptionUsage.findById;
 
   try {
     Subscription.findOne = () => ({
@@ -73,6 +179,21 @@ test('clears stale live sessions before creating the next one', async () => {
     SubscriptionUsage.findOneAndUpdate = async (filter, update) => {
       if (filter.userId === 'user-1' && filter.periodStart) {
         return { ...previousUsage };
+      }
+
+      if (
+        filter._id &&
+        String(filter._id) === String(usageId) &&
+        update.$inc?.liveSeconds
+      ) {
+        return {
+          ...previousUsage,
+          liveSeconds: previousUsage.liveSeconds + update.$inc.liveSeconds,
+          activeLiveSessions: [{
+            ...previousUsage.activeLiveSessions[0],
+            lastHeartbeatAt: now,
+          }],
+        };
       }
 
       if (filter._id && String(filter._id) === String(usageId) && update.$push?.activeLiveSessions) {
@@ -99,6 +220,7 @@ test('clears stale live sessions before creating the next one', async () => {
       }
       return { modifiedCount: 0 };
     };
+    SubscriptionUsage.findById = () => ({ lean: async () => previousUsage });
 
     const result = await usageService.startLiveSession('user-1', 'LIVE_SESSION_START', now);
     assert.equal(result.created, true);
@@ -110,5 +232,6 @@ test('clears stale live sessions before creating the next one', async () => {
     SubscriptionUsage.findOne = originalUsageFindOne;
     SubscriptionUsage.findOneAndUpdate = originalUsageFindOneAndUpdate;
     SubscriptionUsage.updateOne = originalUsageUpdateOne;
+    SubscriptionUsage.findById = originalUsageFindById;
   }
 });

@@ -16,6 +16,8 @@ function errorHandler(err, req, res, next) {
     : null;
   const status = err.status || (isJsonSyntaxError ? 400 : dependency ? 503 : 500);
   const message = err.message || 'Server error';
+  const isServerError = status >= 500;
+  const safeMessage = isProductionEnv() && isServerError ? 'Internal server error.' : message;
 
   if (isJsonSyntaxError) {
     const rawBodyLength = req?.rawBody ? String(req.rawBody).length : 0;
@@ -24,12 +26,10 @@ function errorHandler(err, req, res, next) {
     console.error('[BAD_JSON_REQUEST]', JSON.stringify({
       requestId: req?.requestId || null,
       method: req?.method,
-      url: req?.originalUrl || req?.url,
-      clientIp: req?.ip || req?.connection?.remoteAddress || null,
+      path: req?.path || null,
       contentType,
       rawBodyLength,
-      headers: req?.headers,
-      message,
+      message: 'Malformed JSON request body.',
     }));
 
     return res.status(400).json({
@@ -41,7 +41,7 @@ function errorHandler(err, req, res, next) {
     });
   }
 
-  const response = { success: false, message };
+  const response = { success: false, message: safeMessage };
   if (dependency) {
     response.dependency = dependency;
     response.status = 'UNAVAILABLE_DEPENDENCY';
@@ -53,9 +53,9 @@ function errorHandler(err, req, res, next) {
   console.error('[ERROR]', JSON.stringify({
     requestId: req?.requestId || null,
     method: req?.method,
-    url: req?.originalUrl || req?.url,
+    path: req?.path || null,
     status,
-    message,
+    message: safeMessage,
     code: err.code || null,
   }));
 

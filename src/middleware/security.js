@@ -23,7 +23,9 @@ module.exports = function (app) {
   }));
 
   if (env.nodeEnv === 'production') {
-    app.set('trust proxy', 1);
+    app.set('trust proxy', env.trustProxy);
     app.use(limiter);
+  } else {
+    app.set('trust proxy', env.trustProxy);
   }
 };

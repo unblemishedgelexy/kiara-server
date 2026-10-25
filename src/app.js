@@ -11,11 +11,22 @@ const liveRoutes = require('./routes/liveRoutes');
 const ttsRoutes = require('./routes/ttsRoutes');
 const identityRoutes = require('./routes/identityRoutes');
 const workingMemoryRoutes = require('./routes/workingMemory.routes');
-const emailController = require('./controllers/emailController');
 const security = require('./middleware/security');
 const errorHandler = require('./middleware/errorHandler');
 const { env, isAllowedCorsOrigin } = require('./config/env');
-const { uploadsDir } = require('./services/infrastructure/uploadService');
+const mongoose = require('mongoose');
+const { getRedisClient, getRedisDiagnostics } = require('./services/infrastructure/redisService');
+const redisAbuseProtection = require('./middleware/redisAbuseProtection');
+
+function withTimeout(promise, timeoutMs) {
+  let timeout;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('Readiness check timed out')), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timeout));
+}
 
 const createApp = () => {
   const app = express();
@@ -73,6 +84,31 @@ const createApp = () => {
     next();
   });
 
+  const authAdmission = redisAbuseProtection({
+    scope: 'ip',
+    bucket: 'auth-v2',
+    maxInFlightPerIp: env.authAbuseMaxInFlightPerIp,
+    burstMax: env.authAbuseBurstMax,
+    burstWindowSeconds: env.authAbuseBurstWindowSeconds,
+    blockSeconds: env.authAbuseBlockSeconds,
+    leaseSeconds: env.authAbuseLeaseSeconds,
+  });
+  const apiAdmission = redisAbuseProtection({
+    scope: 'ip',
+    bucket: 'api',
+    skip: (req) => {
+      const originalPath = String(req.originalUrl || req.path).split('?')[0];
+      const isRouteWithDedicatedAdmission = /^\/(?:api\/)?(?:auth|identity)(?:\/|$)/i.test(originalPath)
+        || /^\/(?:api\/)?live\/token$/i.test(originalPath)
+        || /^\/api\/(?:profile|subscriptions)(?:\/|$)/i.test(originalPath);
+      return isRouteWithDedicatedAdmission
+        || ['/health', '/readyz', '/live/health', '/live/health/check'].includes(req.path);
+    },
+  });
+  app.use('/api', apiAdmission);
+  app.use('/api/auth', authAdmission);
+  app.use('/auth', authAdmission);
+
   app.use(bodyParser.json({
     verify: (req, _res, buf, encoding) => {
       if (buf && buf.length) {
@@ -89,8 +125,6 @@ const createApp = () => {
     },
   }));
 
-  app.use('/uploads', express.static(uploadsDir));
-
   app.use('/api/auth', authRoutes);
   app.use('/auth', authRoutes);
   app.use('/api/profile', profileRoutes); 
@@ -102,26 +136,46 @@ const createApp = () => {
   app.use('/api/tts', ttsRoutes);
   app.use('/api/working-memory', workingMemoryRoutes);
 
-  // Development-only performance routes
-  try {
-    const devPerf = require('./routes/devPerfRoutes');
-    app.use('/api/dev', devPerf);
-  } catch (e) {
-    // ignore if not present
+  if (env.nodeEnv !== 'production') {
+    app.use('/api/dev', require('./routes/devPerfRoutes'));
+    app.use('/debug', require('./routes/debugRoutes'));
   }
 
-  // Debug runtime endpoints
-  try {
-    const debugRoutes = require('./routes/debugRoutes');
-    app.use('/debug', debugRoutes);
-  } catch (e) {
-    console.error('[ERROR]', 'Failed to mount debug routes:', e && e.message ? e.message : e);
-  }
-
-  app.get('/test-email', emailController.testEmail);
   app.get('/', (_req, res) => res.json({ success: true, message: 'API Running' }));
   app.get('/health', (_req, res) => res.json({ success: true, ok: true, message: 'API Running' }));
   app.get('/api/health', (_req, res) => res.json({ success: true, ok: true, message: 'API Running' }));
+  const readinessHandler = async (_req, res) => {
+    let redisReady = false;
+    let redisFailureCode = null;
+    try {
+      const client = await withTimeout(getRedisClient(), 1500);
+      redisReady = (await withTimeout(client.ping(), 1000)) === 'PONG';
+    } catch (error) {
+      redisReady = false;
+      redisFailureCode = error?.code || error?.name || 'readiness_error';
+    }
+    const dependencies = {
+      mongodb: mongoose.connection.readyState === 1,
+      redis: redisReady,
+    };
+    const ready = Object.values(dependencies).every(Boolean);
+    const response = {
+      success: ready,
+      ready,
+      dependencies,
+    };
+    if (env.nodeEnv !== 'production') {
+      response.diagnostics = {
+        redis: {
+          ...getRedisDiagnostics(),
+          readinessFailureCode: redisFailureCode,
+        },
+      };
+    }
+    return res.status(ready ? 200 : 503).json(response);
+  };
+  app.get('/readyz', readinessHandler);
+  app.get('/api/readyz', readinessHandler);
 
   app.use(errorHandler);
   return app;

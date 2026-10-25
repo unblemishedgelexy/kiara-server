@@ -7,17 +7,17 @@ const REFRESH_TOKEN_EXPIRES = env.jwtRefreshExpires || '30d';
 
 function generateAccessToken(payload) {
   if (!payload) {
-    console.error('❌ generateAccessToken: payload is missing', payload);
+    console.error('[AUTH_TOKEN_ERROR]', 'access_payload_missing');
     throw new Error('Payload required to generate access token');
   }
   const secret = env.jwtAccessSecret || env.jwtSecret;
   if (!secret) {
-    console.error('❌ JWT_ACCESS_SECRET not found in env');
+    console.error('[AUTH_TOKEN_ERROR]', 'access_secret_missing');
     throw new Error('JWT_ACCESS_SECRET not configured');
   }
   const token = jwt.sign(payload, secret, { expiresIn: ACCESS_TOKEN_EXPIRES });
   if (!token) {
-    console.error('❌ jwt.sign returned undefined');
+    console.error('[AUTH_TOKEN_ERROR]', 'access_sign_failed');
     throw new Error('Failed to generate access token');
   }
   return token;
@@ -25,17 +25,17 @@ function generateAccessToken(payload) {
 
 function generateRefreshToken(payload) {
   if (!payload) {
-    console.error('❌ generateRefreshToken: payload is missing', payload);
+    console.error('[AUTH_TOKEN_ERROR]', 'refresh_payload_missing');
     throw new Error('Payload required to generate refresh token');
   }
   const secret = env.jwtRefreshSecret || env.jwtSecret;
   if (!secret) {
-    console.error('❌ JWT_REFRESH_SECRET not found in env');
+    console.error('[AUTH_TOKEN_ERROR]', 'refresh_secret_missing');
     throw new Error('JWT_REFRESH_SECRET not configured');
   }
   const token = jwt.sign(payload, secret, { expiresIn: REFRESH_TOKEN_EXPIRES });
   if (!token) {
-    console.error('❌ jwt.sign returned undefined');
+    console.error('[AUTH_TOKEN_ERROR]', 'refresh_sign_failed');
     throw new Error('Failed to generate refresh token');
   }
   return token;
@@ -51,8 +51,8 @@ function verifyRefreshToken(token) {
 
 function hashToken(token) {
   if (!token || typeof token !== 'string') {
-    console.error('❌ hashToken received invalid token:', token, 'type:', typeof token);
-    throw new Error(`Token must be a non-empty string. Received: ${typeof token}`);
+    console.error('[AUTH_TOKEN_ERROR]', 'invalid_token_for_hash');
+    throw new Error('Token must be a non-empty string.');
   }
   return crypto.createHash('sha256').update(token).digest('hex');
 }

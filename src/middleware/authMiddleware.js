@@ -1,5 +1,6 @@
 const { verifyAccessToken } = require('../services/../services/auth/tokenService');
 const { extractBearerToken } = require('../utils/authCookies');
+const UserModel = require('../models/User');
 
 function readRequestToken(req) {
   const authHeader = req.headers.authorization || '';
@@ -12,22 +13,35 @@ function attachAuthUser(req, payload) {
   req.userId = typeof userId === 'object' && userId !== null && userId.id ? userId.id : userId;
 }
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   const token = readRequestToken(req);
 
   if (!token) {
     return res.status(401).json({ success: false, message: 'Authentication required.' });
   }
 
+  let payload;
   try {
-    
-    const payload = verifyAccessToken(token);
-    
-    attachAuthUser(req, payload);
-    next();
+    payload = verifyAccessToken(token);
   } catch (err) {
     return res.status(401).json({ success: false, message: 'Invalid or expired token.' });
   }
+
+  attachAuthUser(req, payload);
+  try {
+    const user = await UserModel.findById(req.userId).select('isActive').lean();
+    if (!user || !user.isActive) {
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_INACTIVE',
+        message: 'This account is inactive. Sign in within the 10-day deletion period to reactivate it.',
+      });
+    }
+  } catch (error) {
+    return next(error);
+  }
+
+  return next();
 }
 
 function optionalAuthMiddleware(req, _res, next) {

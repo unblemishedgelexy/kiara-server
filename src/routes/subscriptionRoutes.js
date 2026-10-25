@@ -1,6 +1,7 @@
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
 const controller = require('../controllers/subscriptionController');
+const redisAbuseProtection = require('../middleware/redisAbuseProtection');
 
 const router = express.Router();
 
@@ -8,6 +9,11 @@ router.get('/plans', controller.getPlans);
 router.post('/webhook/razorpay', controller.razorpayWebhook);
 
 router.use(authMiddleware);
+router.use(redisAbuseProtection({
+  scope: 'account-ip',
+  bucket: 'api-protected',
+  additionalIpBuckets: ['api'],
+}));
 router.get('/me', controller.getAccount);
 router.post('/checkout', controller.createCheckout);
 router.post('/verify', controller.verifyCheckout);

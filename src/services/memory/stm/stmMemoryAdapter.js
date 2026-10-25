@@ -3,6 +3,7 @@
 const { StmMemoryAdapterContract } = require('./stmMemoryAdapterContract');
 const WorkingMemoryRedis = require('../../workingMemory/redisOperations');
 const ConversationTurn = require('../../../models/ConversationTurn');
+const { env } = require('../../../config/env');
 
 const STM_WINDOW_MS = 20 * 60 * 1000;
 const STOP_WORDS = new Set([
@@ -86,7 +87,9 @@ class StmMemoryAdapter extends StmMemoryAdapterContract {
     const windowEnd = new Date(now).toISOString();
     const limit = Math.min(Math.max(Number(options.limit) || 5, 1), 12);
 
+    options.signal?.throwIfAborted();
     const storedTurns = await this.redis.getRecentMemory(safeUserId);
+    options.signal?.throwIfAborted();
     const scopedTurns = Array.isArray(storedTurns) ? storedTurns : [];
     let sessionTurns = scopedTurns;
 
@@ -95,7 +98,11 @@ class StmMemoryAdapter extends StmMemoryAdapterContract {
         userId: safeUserId,
         sessionId: String(sessionId),
         timestamp: { $gte: new Date(windowStart), $lte: new Date(windowEnd) },
-      }).select('userMessage assistantResponse timestamp raw').sort({ timestamp: -1 }).lean();
+      }).select('userMessage assistantResponse timestamp')
+        .sort({ timestamp: -1 })
+        .maxTimeMS(env.memoryMongoQueryTimeoutMs)
+        .lean();
+      options.signal?.throwIfAborted();
       const allowed = new Set(backupTurns.map(normalizeBackupTurn).filter((turn) => turn.timestamp).map(turnKey));
       sessionTurns = scopedTurns.filter((turn) => allowed.has(turnKey({
         timestamp: turn.timestamp ? new Date(turn.timestamp).toISOString() : null,

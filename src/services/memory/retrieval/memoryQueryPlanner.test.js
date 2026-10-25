@@ -84,66 +84,6 @@ test('falls back on provider errors and skips ineligible queries', async () => {
   assert.equal(calls, 1);
 });
 
-test('emits correlated privacy-safe outcome diagnostics for planner results', async () => {
-  const infoEvents = [];
-  const warnEvents = [];
-  const originalInfo = console.info;
-  const originalWarn = console.warn;
-  console.info = (label, payload) => {
-    if (label === '[MEMORY_QUERY_PLANNER]') infoEvents.push(JSON.parse(payload));
-  };
-  console.warn = (label, payload) => {
-    if (label === '[MEMORY_QUERY_PLANNER]') warnEvents.push(JSON.parse(payload));
-  };
-
-  try {
-    const validPlanner = createMemoryQueryPlanner({
-      generateTextFn: async () => '{"intent":"DURABLE","sources":["LONG_TERM"]}',
-    });
-    await validPlanner('What is my lantern code?', { traceId: 'planner-diagnostic-trace' });
-
-    const invalidPlanner = createMemoryQueryPlanner({
-      generateTextFn: async () => '{"intent":"DURABLE","sources":["UNAPPROVED"]}',
-    });
-    await invalidPlanner('What is my lantern code?', { traceId: 'planner-invalid-trace' });
-
-    const failurePlanner = createMemoryQueryPlanner({
-      generateTextFn: async () => { throw new Error('provider failure with sensitive detail'); },
-    });
-    await failurePlanner('What is my lantern code?', { traceId: 'planner-failure-trace' });
-
-    const skippedPlanner = createMemoryQueryPlanner({
-      generateTextFn: async () => { throw new Error('must not be called'); },
-    });
-    await skippedPlanner('Hello there', { traceId: 'planner-skipped-trace' });
-  } finally {
-    console.info = originalInfo;
-    console.warn = originalWarn;
-  }
-
-  assert.deepEqual(infoEvents[0], {
-    traceId: 'planner-diagnostic-trace',
-    invoked: true,
-    providerOutcome: 'SUCCESS',
-    responseReceived: true,
-    validationResult: 'VALID',
-    elapsedMs: infoEvents[0].elapsedMs,
-    acceptedIntent: 'DURABLE',
-    acceptedSources: ['LONG_TERM'],
-    fallbackReason: null,
-  });
-  assert.equal(infoEvents[1].validationResult, 'INVALID');
-  assert.equal(infoEvents[1].responseReceived, true);
-  assert.deepEqual(infoEvents[1].acceptedSources, []);
-  assert.equal(infoEvents[1].fallbackReason, 'SCHEMA_VALIDATION_FAILED');
-  assert.equal(warnEvents[0].providerOutcome, 'UNKNOWN_PROVIDER_ERROR');
-  assert.equal(warnEvents[0].fallbackReason, 'PROVIDER_FAILURE');
-  assert.equal(JSON.stringify([...infoEvents, ...warnEvents]).includes('sensitive detail'), false);
-  assert.equal(infoEvents[2].invoked, false);
-  assert.equal(infoEvents[2].providerOutcome, 'NOT_CALLED');
-  assert.equal(infoEvents[2].fallbackReason, 'QUERY_NOT_ELIGIBLE');
-});
-
 test('classifies structured SDK errors without exposing messages or headers', () => {
   const cases = [
     [{ status: 401, name: 'AuthenticationError', error: { code: 'invalid_api_key' } }, 'AUTHENTICATION'],

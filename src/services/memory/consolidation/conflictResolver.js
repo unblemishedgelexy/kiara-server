@@ -43,16 +43,25 @@ function isStalePreferenceVersion(existingMemory, candidate) {
 
 function resolveConflict({ candidate, existingMemory }) {
   if (!candidate) {
-    return normalizeDecisionResult({ decision: 'IGNORE', reason: 'No candidate supplied.' });
+    return normalizeDecisionResult({
+      decision: 'IGNORE',
+      reasonCode: 'NO_CANDIDATE',
+      reason: 'No candidate supplied.',
+    });
   }
 
   if (isTrivialCandidate(candidate)) {
-    return normalizeDecisionResult({ decision: 'IGNORE', reason: 'Candidate is too trivial to persist.' });
+    return normalizeDecisionResult({
+      decision: 'IGNORE',
+      reasonCode: 'TRIVIAL_CANDIDATE',
+      reason: 'Candidate is too trivial to persist.',
+    });
   }
 
   if (isStalePreferenceVersion(existingMemory, candidate)) {
     return normalizeDecisionResult({
       decision: 'DUPLICATE',
+      reasonCode: 'STALE_PREFERENCE_DUPLICATE',
       candidate,
       existingMemory,
       reason: 'An older preference version cannot replace a newer canonical value.',
@@ -63,6 +72,7 @@ function resolveConflict({ candidate, existingMemory }) {
   if (existingMemory && detectDuplicate(existingMemory, candidate)) {
     return normalizeDecisionResult({
       decision: 'DUPLICATE',
+      reasonCode: 'EXISTING_MEMORY_MATCH',
       candidate,
       existingMemory,
       reason: 'Candidate matches an existing active memory.',

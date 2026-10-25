@@ -6,15 +6,8 @@ const {
   ELEVENLABS_VOICE_SETTINGS,
 } = require('../../config/constants');
 
-async function streamElevenLabsSpeech(text) {
-  console.log('[KIARA_TTS] ElevenLabs config:', {
-    apiKeyConfigured: Boolean(env.elevenLabsApiKey),
-    voiceIdConfigured: Boolean(env.elevenLabsVoiceId),
-    voiceId: env.elevenLabsVoiceId || null,
-  });
-
+async function streamElevenLabsSpeech(text, { signal } = {}) {
   if (!env.elevenLabsApiKey || !env.elevenLabsVoiceId) {
-    console.log('[KIARA_TTS] ElevenLabs API key or voice ID is not set.');
     return null;
   }
 
@@ -34,6 +27,7 @@ async function streamElevenLabsSpeech(text) {
         'Content-Type': 'application/json',
         'xi-api-key': env.elevenLabsApiKey,
       },
+      signal,
       body: JSON.stringify({
         text,
         model_id: ELEVENLABS_TTS_MODEL,

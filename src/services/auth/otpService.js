@@ -54,7 +54,6 @@ class SmsProvider {
     }
 
     if (!isProductionEnv()) {
-      console.log(`SMS OTP for ${to}: ${code}`);
       return;
     }
 
