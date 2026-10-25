@@ -53,14 +53,14 @@ async function getAccountOverview(userId) {
 
   return {
     ...usage,
-    checkout: getPublicCheckoutConfig(),
-    latestSubscription: latestSubscription ? {
+    checkout: usage.isAdmin ? { available: false, keyId: null } : getPublicCheckoutConfig(),
+    latestSubscription: usage.isAdmin || !latestSubscription ? null : {
       planId: latestSubscription.planId,
       status: latestSubscription.status,
       pendingPlanId: latestSubscription.pendingPlanId,
       pendingPlanChangeAt: latestSubscription.pendingPlanChangeAt,
       cancelAtCycleEnd: latestSubscription.cancelAtCycleEnd,
-    } : null,
+    },
   };
 }
 

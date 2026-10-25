@@ -1,6 +1,7 @@
 const { randomUUID } = require('crypto');
 const Subscription = require('../../models/Subscription');
 const SubscriptionUsage = require('../../models/SubscriptionUsage');
+const User = require('../../models/User');
 const { findPaidPlan, freePlan, getPublicPlans, toEntitlementPlan } = require('../../config/subscriptionPlans');
 const { env } = require('../../config/env');
 const { isCheckoutConfigured } = require('../razorpay/razorpayClient');
@@ -64,8 +65,42 @@ async function getCurrentSubscription(userId, now = new Date()) {
   }).sort({ expiresAt: -1, createdAt: -1 }).lean();
 }
 
+async function isAdminUser(userId) {
+  const user = await User.findById(userId).select('role isActive').lean();
+  return Boolean(user?.isActive && user.role === 'admin');
+}
+
 async function getOverview(userId, now = new Date()) {
   const period = getUtcBillingPeriod(now);
+  const admin = await isAdminUser(userId);
+  if (admin) {
+    const usage = await ensureUsageRow(userId, period);
+    return {
+      checkoutAvailable: false,
+      currentPlan: {
+        id: 'admin',
+        name: 'Admin Lifetime',
+        priceInr: 0,
+        currency: 'INR',
+        liveMinutes: null,
+        chatMessages: null,
+      },
+      isAdmin: true,
+      plans: getPublicPlans(),
+      status: 'admin',
+      subscription: null,
+      usage: {
+        periodStart: period.periodStart,
+        periodEnd: period.periodEnd,
+        liveSeconds: usage?.liveSeconds || 0,
+        liveMinutes: Math.floor((usage?.liveSeconds || 0) / 60),
+        liveMinutesLimit: null,
+        chatMessages: usage?.chatMessages || 0,
+        chatMessagesLimit: null,
+      },
+    };
+  }
+
   const [subscription, latestSubscription, usage] = await Promise.all([
     getCurrentSubscription(userId, now),
     Subscription.findOne({ userId }).sort({ createdAt: -1 }).lean(),
@@ -83,6 +118,7 @@ async function getOverview(userId, now = new Date()) {
 
   return {
     checkoutAvailable: isCheckoutConfigured(),
+    isAdmin: false,
     currentPlan: {
       ...plan,
       priceInr: currentPaidPlan?.priceInr ?? 0,
@@ -113,11 +149,12 @@ async function getOverview(userId, now = new Date()) {
 async function reserveChatMessage(userId) {
   const now = new Date();
   const period = getUtcBillingPeriod(now);
+  const admin = await isAdminUser(userId);
   const [usage, subscription] = await Promise.all([
     ensureUsageRow(userId, period),
-    getCurrentSubscription(userId, now),
+    admin ? null : getCurrentSubscription(userId, now),
   ]);
-  const plan = subscription ? findPaidPlan(subscription.planId) : null;
+  const plan = !admin && subscription ? findPaidPlan(subscription.planId) : null;
   const limit = plan?.chatMessages ?? null;
   const reservationId = randomUUID();
   const expiresAt = new Date(now.getTime() + CHAT_RESERVATION_TTL_MS);
@@ -167,7 +204,7 @@ async function reserveChatMessage(userId) {
     reservationId,
     usage: (updated.chatMessages || 0) + (updated.pendingChatReservations || []).length,
     limit,
-    plan: plan?.id || 'free',
+    plan: admin ? 'admin' : plan?.id || 'free',
   };
 }
 
@@ -200,8 +237,9 @@ async function releaseChatReservation(userId, reservationId) {
 
 async function startLiveSession(userId, lifecycleTrigger = 'LIVE_SESSION_START', now = new Date()) {
   const period = getUtcBillingPeriod(now);
+  const admin = await isAdminUser(userId);
   const usage = await ensureUsageRow(userId, period);
-  const subscription = await getCurrentSubscription(userId, now);
+  const subscription = admin ? null : await getCurrentSubscription(userId, now);
   const plan = subscription ? findPaidPlan(subscription.planId) : null;
   const maxLiveSeconds = plan ? plan.liveMinutes * 60 : null;
   const isResume = lifecycleTrigger === 'LIVE_TOKEN_REFRESH' || lifecycleTrigger === 'LIVE_SESSION_RECONNECT';
@@ -303,7 +341,8 @@ async function getActiveLiveSession(userId) {
 
 async function heartbeatLiveSession(userId, sessionId, now = new Date()) {
   const period = getUtcBillingPeriod(now);
-  const subscription = await getCurrentSubscription(userId, now);
+  const admin = await isAdminUser(userId);
+  const subscription = admin ? null : await getCurrentSubscription(userId, now);
   const plan = subscription ? findPaidPlan(subscription.planId) : null;
   const maxLiveSeconds = plan ? plan.liveMinutes * 60 : null;
 
@@ -407,6 +446,7 @@ module.exports = {
   endLiveSession,
   ensureUsageRow,
   getCurrentSubscription,
+  isAdminUser,
   getActiveLiveSession,
   getOverview,
   getUtcBillingPeriod,

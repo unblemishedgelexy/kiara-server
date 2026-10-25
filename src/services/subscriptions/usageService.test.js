@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 const Subscription = require('../../models/Subscription');
 const SubscriptionUsage = require('../../models/SubscriptionUsage');
+const User = require('../../models/User');
 const usageService = require('./usageService');
 
 const {
@@ -21,6 +22,89 @@ test('free entitlement meters usage without enforcing a paid limit', () => {
   assert.deepEqual(calculateLiveCharge(30, 120, null), { billedSeconds: 30, limitReached: false });
 });
 
+test('active admin role receives lifetime entitlement without monthly chat or Live limits', async () => {
+  const originalUserFindById = User.findById;
+  const originalSubscriptionFindOne = Subscription.findOne;
+  const originalUsageFindOne = SubscriptionUsage.findOne;
+  const originalUsageFindOneAndUpdate = SubscriptionUsage.findOneAndUpdate;
+  const originalUsageUpdateOne = SubscriptionUsage.updateOne;
+  const originalMaxActiveSessions = require('../../config/env').env.maxActiveLiveSessionsPerAccount;
+  const usage = {
+    _id: new mongoose.Types.ObjectId(),
+    userId: 'admin-user',
+    periodStart: getUtcBillingPeriod().periodStart,
+    periodEnd: getUtcBillingPeriod().periodEnd,
+    liveSeconds: 1_000_000,
+    chatMessages: 50_000,
+    pendingChatReservations: [],
+    activeLiveSessions: [],
+  };
+
+  try {
+    User.findById = () => ({
+      select: () => ({
+        lean: async () => ({ role: 'admin', isActive: true }),
+      }),
+    });
+    Subscription.findOne = () => {
+      throw new Error('Admin entitlement must not depend on a subscription record or expiry.');
+    };
+    SubscriptionUsage.findOneAndUpdate = async (_filter, update) => {
+      if (update.$setOnInsert) return usage;
+      if (update.$push?.pendingChatReservations) {
+        usage.pendingChatReservations.push(update.$push.pendingChatReservations);
+        return usage;
+      }
+      if (update.$push?.activeLiveSessions) {
+        usage.activeLiveSessions.push(update.$push.activeLiveSessions);
+        return usage;
+      }
+      if (update.$inc?.liveSeconds) {
+        usage.liveSeconds += update.$inc.liveSeconds;
+        usage.activeLiveSessions[0].lastHeartbeatAt = update.$set['activeLiveSessions.$.lastHeartbeatAt'];
+        return usage;
+      }
+      return null;
+    };
+    SubscriptionUsage.findOne = async () => usage;
+    SubscriptionUsage.updateOne = async () => ({ modifiedCount: 0 });
+
+    const overview = await usageService.getOverview('admin-user');
+    assert.equal(overview.isAdmin, true);
+    assert.equal(overview.status, 'admin');
+    assert.equal(overview.currentPlan.id, 'admin');
+    assert.equal(overview.currentPlan.name, 'Admin Lifetime');
+    assert.equal(overview.currentPlan.liveMinutes, null);
+    assert.equal(overview.currentPlan.chatMessages, null);
+    assert.equal(overview.usage.liveMinutesLimit, null);
+    assert.equal(overview.usage.chatMessagesLimit, null);
+    assert.equal(overview.subscription, null);
+
+    const chat = await usageService.reserveChatMessage('admin-user');
+    assert.equal(chat.plan, 'admin');
+    assert.equal(chat.limit, null);
+
+    const live = await usageService.startLiveSession('admin-user');
+    assert.equal(live.created, true);
+    assert.ok(live.sessionId);
+    const heartbeat = await usageService.heartbeatLiveSession(
+      'admin-user',
+      live.sessionId,
+      new Date(Date.now() + 30_000),
+    );
+    assert.equal(heartbeat.allowed, true);
+    assert.equal(heartbeat.limitReached, false);
+    assert.equal(heartbeat.billedSeconds, 30);
+  } finally {
+    User.findById = originalUserFindById;
+    Subscription.findOne = originalSubscriptionFindOne;
+    SubscriptionUsage.findOne = originalUsageFindOne;
+    SubscriptionUsage.findOneAndUpdate = originalUsageFindOneAndUpdate;
+    SubscriptionUsage.updateOne = originalUsageUpdateOne;
+    require('../../config/env').env.maxActiveLiveSessionsPerAccount = originalMaxActiveSessions;
+  }
+});
+
 test('paid chat quota is checked atomically against completed and pending messages', async () => {
   const usageId = new mongoose.Types.ObjectId();
   const usage = {
@@ -33,6 +117,7 @@ test('paid chat quota is checked atomically against completed and pending messag
     activeLiveSessions: [],
   };
   const originals = {
+    userFindById: User.findById,
     subscriptionFindOne: Subscription.findOne,
     usageFindOneAndUpdate: SubscriptionUsage.findOneAndUpdate,
     usageUpdateOne: SubscriptionUsage.updateOne,
@@ -40,6 +125,11 @@ test('paid chat quota is checked atomically against completed and pending messag
   };
 
   try {
+    User.findById = () => ({
+      select: () => ({
+        lean: async () => ({ role: 'user', isActive: true }),
+      }),
+    });
     Subscription.findOne = () => ({
       sort: () => ({
         lean: async () => ({
@@ -67,6 +157,7 @@ test('paid chat quota is checked atomically against completed and pending messag
       },
     );
   } finally {
+    User.findById = originals.userFindById;
     Subscription.findOne = originals.subscriptionFindOne;
     SubscriptionUsage.findOneAndUpdate = originals.usageFindOneAndUpdate;
     SubscriptionUsage.updateOne = originals.usageUpdateOne;
@@ -86,6 +177,7 @@ test('paid live quota blocks new sessions at the plan boundary', async () => {
     activeLiveSessions: [],
   };
   const originals = {
+    userFindById: User.findById,
     subscriptionFindOne: Subscription.findOne,
     usageFindOneAndUpdate: SubscriptionUsage.findOneAndUpdate,
     usageUpdateOne: SubscriptionUsage.updateOne,
@@ -93,6 +185,11 @@ test('paid live quota blocks new sessions at the plan boundary', async () => {
   };
 
   try {
+    User.findById = () => ({
+      select: () => ({
+        lean: async () => ({ role: 'user', isActive: true }),
+      }),
+    });
     Subscription.findOne = () => ({
       sort: () => ({
         lean: async () => ({
@@ -119,6 +216,7 @@ test('paid live quota blocks new sessions at the plan boundary', async () => {
       },
     );
   } finally {
+    User.findById = originals.userFindById;
     Subscription.findOne = originals.subscriptionFindOne;
     SubscriptionUsage.findOneAndUpdate = originals.usageFindOneAndUpdate;
     SubscriptionUsage.updateOne = originals.usageUpdateOne;
@@ -152,12 +250,18 @@ test('clears stale live sessions before creating the next one', async () => {
   };
 
   const originalFindOne = Subscription.findOne;
+  const originalUserFindById = User.findById;
   const originalUsageFindOne = SubscriptionUsage.findOne;
   const originalUsageFindOneAndUpdate = SubscriptionUsage.findOneAndUpdate;
   const originalUsageUpdateOne = SubscriptionUsage.updateOne;
   const originalUsageFindById = SubscriptionUsage.findById;
 
   try {
+    User.findById = () => ({
+      select: () => ({
+        lean: async () => ({ role: 'user', isActive: true }),
+      }),
+    });
     Subscription.findOne = () => ({
       sort: () => ({
         lean: async () => ({
@@ -228,6 +332,7 @@ test('clears stale live sessions before creating the next one', async () => {
     assert.equal(typeof result.sessionId, 'string');
     assert.ok(result.sessionId.length > 0);
   } finally {
+    User.findById = originalUserFindById;
     Subscription.findOne = originalFindOne;
     SubscriptionUsage.findOne = originalUsageFindOne;
     SubscriptionUsage.findOneAndUpdate = originalUsageFindOneAndUpdate;

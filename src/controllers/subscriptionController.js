@@ -32,6 +32,13 @@ async function getAccount(req, res) {
 
 async function createCheckout(req, res) {
   try {
+    if (await usageService.isAdminUser(req.userId)) {
+      throw subscriptionService.serviceError(
+        'Admin accounts have lifetime Kiara access and do not need a paid plan.',
+        'ADMIN_LIFETIME_ACCESS',
+        403,
+      );
+    }
     const planId = req.body?.planId;
     if (typeof planId !== 'string') {
       throw subscriptionService.serviceError('A plan must be selected.', 'INVALID_PLAN', 400);
