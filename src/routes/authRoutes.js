@@ -88,7 +88,10 @@ router.post('/legal-consent', validateRequest(legalConsentSchema), authMiddlewar
 router.post('/login', validateRequest(loginSchema), authController.login);
 router.post('/dev-session', authController.createLocalDevelopmentSession);
 router.get('/google/url', validateRequest(Joi.object({
-  query: Joi.object({ redirectUri: Joi.string().required() }).unknown(true),
+  query: Joi.object({
+    redirectUri: Joi.string().required(),
+    purpose: Joi.string().valid('admin', 'user').default('admin'),
+  }).unknown(true),
 })), authController.getGoogleAuthUrl);
 router.get('/google/callback', authController.handleGoogleCallback);
 router.post('/send-otp', validateRequest(sendOtpSchema), authController.sendOtp);

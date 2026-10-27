@@ -26,9 +26,13 @@ function createState() {
   return base64UrlEncode(crypto.randomBytes(32));
 }
 
-async function createAuthRequest(returnUrl) {
+async function createAuthRequest(returnUrl, purpose = 'admin') {
   if (!returnUrl || typeof returnUrl !== 'string') {
     throw new Error('A redirectUri is required.');
+  }
+
+  if (!['admin', 'user'].includes(purpose)) {
+    throw new Error('Unsupported Google sign-in purpose.');
   }
 
   if (!isAllowedOAuthReturnUrl(returnUrl)) {
@@ -52,6 +56,7 @@ async function createAuthRequest(returnUrl) {
     state,
     codeVerifier,
     returnUrl,
+    purpose,
     expiresAt,
   });
 

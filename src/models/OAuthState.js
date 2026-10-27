@@ -5,6 +5,7 @@ const OAuthStateSchema = new mongoose.Schema(
     state: { type: String, required: true, unique: true },
     codeVerifier: { type: String, required: true },
     returnUrl: { type: String, required: true },
+    purpose: { type: String, enum: ['admin', 'user'], default: 'admin' },
     expiresAt: { type: Date, required: true },
   },
   { timestamps: true }

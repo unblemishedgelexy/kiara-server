@@ -4,7 +4,7 @@ const { generateAccessToken, generateRefreshToken } = require('../services/../se
 const UserModel = require('../models/User');
 const bcrypt = require('bcryptjs');
 const googleOAuthService = require('../services/../services/auth/googleOAuthService');
-const { hasAdminPanelAccess } = require('../middleware/requireAdmin');
+const { isGoogleOAuthAccountAllowed } = require('../services/auth/googleOAuthPolicy');
 
 
 function buildAuthPayload(user, accessToken, refreshToken) {
@@ -181,11 +181,12 @@ async function login(req, res, next) {
 async function getGoogleAuthUrl(req, res, next) {
   try {
     const redirectUri = typeof req.query?.redirectUri === 'string' ? req.query.redirectUri.trim() : '';
+    const purpose = typeof req.query?.purpose === 'string' ? req.query.purpose : 'admin';
     if (!redirectUri) {
       return res.status(400).json({ success: false, message: 'redirectUri is required.' });
     }
 
-    const result = await googleOAuthService.createAuthRequest(redirectUri);
+    const result = await googleOAuthService.createAuthRequest(redirectUri, purpose);
     res.json({ success: true, authUrl: result.authUrl, data: { authUrl: result.authUrl } });
   } catch (error) {
     return res.status(400).json({ success: false, message: error.message || 'Unable to create Google auth URL.' });
@@ -232,9 +233,20 @@ async function handleGoogleCallback(req, res, next) {
     ]);
     const googleIdMismatch = emailAccount?.googleId && emailAccount.googleId !== googleUser.googleId;
     const emailMismatch = linkedGoogleAccount && linkedGoogleAccount.email.toLowerCase() !== normalizedEmail;
-    if (!hasAdminPanelAccess(emailAccount) || googleIdMismatch || emailMismatch) {
+    const purpose = authState.purpose || 'admin';
+    if (!isGoogleOAuthAccountAllowed({
+      purpose,
+      emailAccount,
+      googleIdMismatch: Boolean(googleIdMismatch),
+      emailMismatch: Boolean(emailMismatch),
+    })) {
       returnUrl.searchParams.set('status', 'denied');
-      returnUrl.searchParams.set('message', 'This Google account is not assigned an active admin or developer role.');
+      returnUrl.searchParams.set(
+        'message',
+        purpose === 'admin'
+          ? 'This Google account is not assigned an active admin or developer role.'
+          : 'This Google account is not eligible for regular user sign-in.',
+      );
       return res.redirect(303, returnUrl.toString());
     }
 
