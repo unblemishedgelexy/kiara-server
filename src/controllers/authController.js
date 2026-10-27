@@ -181,7 +181,7 @@ async function login(req, res, next) {
 async function getGoogleAuthUrl(req, res, next) {
   try {
     const redirectUri = typeof req.query?.redirectUri === 'string' ? req.query.redirectUri.trim() : '';
-    const purpose = typeof req.query?.purpose === 'string' ? req.query.purpose : 'admin';
+    const purpose = typeof req.query?.purpose === 'string' ? req.query.purpose : 'user';
     if (!redirectUri) {
       return res.status(400).json({ success: false, message: 'redirectUri is required.' });
     }
@@ -233,7 +233,7 @@ async function handleGoogleCallback(req, res, next) {
     ]);
     const googleIdMismatch = emailAccount?.googleId && emailAccount.googleId !== googleUser.googleId;
     const emailMismatch = linkedGoogleAccount && linkedGoogleAccount.email.toLowerCase() !== normalizedEmail;
-    const purpose = authState.purpose || 'admin';
+    const purpose = authState.purpose || 'user';
     if (!isGoogleOAuthAccountAllowed({
       purpose,
       emailAccount,
@@ -243,9 +243,7 @@ async function handleGoogleCallback(req, res, next) {
       returnUrl.searchParams.set('status', 'denied');
       returnUrl.searchParams.set(
         'message',
-        purpose === 'admin'
-          ? 'This Google account is not assigned an active admin or developer role.'
-          : 'This Google account is not eligible for regular user sign-in.',
+        'This Google account is not eligible for regular user sign-in.',
       );
       return res.redirect(303, returnUrl.toString());
     }

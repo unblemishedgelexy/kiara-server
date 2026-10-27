@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const perf = require('../middleware/perfCollector');
-const authMiddleware = require('../middleware/authMiddleware');
+const adminAuthMiddleware = require('../middleware/adminAuthMiddleware');
 const requireAdmin = require('../middleware/requireAdmin');
 
-router.use(authMiddleware, requireAdmin);
+router.use(adminAuthMiddleware, requireAdmin);
 
 router.get('/perf', (_req, res) => {
   res.json(perf.getSummary());

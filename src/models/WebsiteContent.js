@@ -19,7 +19,7 @@ const websiteContentSchema = new mongoose.Schema(
       ],
     },
     apkFileId: { type: String, default: null },
-    apkStorageProvider: { type: String, enum: ['r2'], default: null },
+    apkStorageProvider: { type: String, enum: ['imagekit', 'r2'], default: null },
     apkStorageKey: { type: String, default: null },
     apkUrl: { type: String, default: null },
     apkOriginalName: { type: String, default: null },

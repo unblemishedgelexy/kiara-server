@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const Admin = require('../models/Admin');
 const User = require('../models/User');
 const requireAdmin = require('./requireAdmin');
 const { hasAdminPanelAccess, requireRoles } = require('./requireAdmin');
@@ -20,8 +21,8 @@ function createResponse() {
 }
 
 async function runAdminGuard(user) {
-  const previousFindById = User.findById;
-  User.findById = () => ({
+  const previousFindById = Admin.findById;
+  Admin.findById = () => ({
     select() {
       return this;
     },
@@ -37,7 +38,7 @@ async function runAdminGuard(user) {
     });
     return { req, res, nextCalled };
   } finally {
-    User.findById = previousFindById;
+    Admin.findById = previousFindById;
   }
 }
 

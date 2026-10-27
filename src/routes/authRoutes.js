@@ -90,7 +90,7 @@ router.post('/dev-session', authController.createLocalDevelopmentSession);
 router.get('/google/url', validateRequest(Joi.object({
   query: Joi.object({
     redirectUri: Joi.string().required(),
-    purpose: Joi.string().valid('admin', 'user').default('admin'),
+    purpose: Joi.string().valid('user').default('user'),
   }).unknown(true),
 })), authController.getGoogleAuthUrl);
 router.get('/google/callback', authController.handleGoogleCallback);

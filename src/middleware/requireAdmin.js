@@ -1,4 +1,4 @@
-const UserModel = require('../models/User');
+const AdminModel = require('../models/Admin');
 
 function hasAdminPanelAccess(user) {
   return Boolean(user?.isActive && ['admin', 'dev'].includes(user.role));
@@ -6,11 +6,11 @@ function hasAdminPanelAccess(user) {
 
 async function requireAdmin(req, res, next) {
   try {
-    const user = await UserModel.findById(req.userId).select('role isActive').lean();
-    if (!hasAdminPanelAccess(user)) {
+    const admin = await AdminModel.findById(req.adminId || req.userId).select('role isActive').lean();
+    if (!hasAdminPanelAccess(admin)) {
       return res.status(403).json({ success: false, message: 'Administrator or developer access required.' });
     }
-    req.adminRole = user.role;
+    req.adminRole = admin.role;
     return next();
   } catch (error) {
     return next(error);

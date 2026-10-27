@@ -1,9 +1,7 @@
 'use strict';
 
-const { hasAdminPanelAccess } = require('../../middleware/requireAdmin');
-
 function isGoogleOAuthAccountAllowed({
-  purpose = 'admin',
+  purpose = 'user',
   emailAccount,
   googleIdMismatch = false,
   emailMismatch = false,
@@ -12,11 +10,8 @@ function isGoogleOAuthAccountAllowed({
     return false;
   }
 
-  if (purpose === 'user') {
-    return !emailAccount || (emailAccount.role === 'user' && emailAccount.isActive === true);
-  }
-
-  return hasAdminPanelAccess(emailAccount);
+  return purpose === 'user'
+    && (!emailAccount || (emailAccount.role === 'user' && emailAccount.isActive === true));
 }
 
 module.exports = { isGoogleOAuthAccountAllowed };

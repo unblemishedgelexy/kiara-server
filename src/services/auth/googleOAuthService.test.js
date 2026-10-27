@@ -30,9 +30,13 @@ test('stores the requested Google sign-in purpose in the server-side OAuth state
     await googleOAuthService.createAuthRequest('http://localhost:5173/auth/callback', 'user');
     await googleOAuthService.createAuthRequest('http://localhost:5173/auth/callback');
 
-    assert.deepEqual(savedStates.map(({ purpose }) => purpose), ['user', 'admin']);
+    assert.deepEqual(savedStates.map(({ purpose }) => purpose), ['user', 'user']);
     await assert.rejects(
       googleOAuthService.createAuthRequest('http://localhost:5173/auth/callback', 'owner'),
+      /Unsupported Google sign-in purpose/,
+    );
+    await assert.rejects(
+      googleOAuthService.createAuthRequest('http://localhost:5173/auth/callback', 'admin'),
       /Unsupported Google sign-in purpose/,
     );
     assert.equal(savedStates.length, 2);

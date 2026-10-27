@@ -128,6 +128,7 @@ test('password login refuses an otherwise valid unverified account', async () =>
   const user = {
     email: 'test.user@gmail.com',
     emailVerified: false,
+    role: 'user',
     passwordHash: await bcrypt.hash('a-test-password', 4),
   };
 
@@ -141,5 +142,25 @@ test('password login refuses an otherwise valid unverified account', async () =>
   } finally {
     UserModel.findOne = originals.findOne;
     accountDeletionService.cancelDeletionAfterLogin = originals.cancelDeletionAfterLogin;
+  }
+});
+
+test('regular password login refuses admin accounts', async () => {
+  const originalFindOne = UserModel.findOne;
+  const user = {
+    email: 'admin@gmail.com',
+    emailVerified: true,
+    role: 'admin',
+    passwordHash: await bcrypt.hash('a-test-password', 4),
+  };
+
+  try {
+    UserModel.findOne = async () => user;
+    await assert.rejects(
+      authService.loginWithEmailPassword(user.email, 'a-test-password'),
+      /Invalid email or password/,
+    );
+  } finally {
+    UserModel.findOne = originalFindOne;
   }
 });

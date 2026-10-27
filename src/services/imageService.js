@@ -10,6 +10,10 @@ const imagekit = new ImageKit({
   urlEndpoint: env.imagekitUrlEndpoint,
 });
 
+function isImageKitConfigured() {
+  return Boolean(env.imagekitPublicKey && env.imagekitPrivateKey && env.imagekitUrlEndpoint);
+}
+
 async function uploadFileToImageKit(filePath, fileName) {
   const absolute = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath);
   const buffer = await fs.promises.readFile(absolute);
@@ -43,4 +47,9 @@ async function deleteFileFromImageKit(fileId) {
   await imagekit.files.delete(fileId);
 }
 
-module.exports = { uploadFileToImageKit, uploadFileStreamToImageKit, deleteFileFromImageKit };
+module.exports = {
+  isImageKitConfigured,
+  uploadFileToImageKit,
+  uploadFileStreamToImageKit,
+  deleteFileFromImageKit,
+};

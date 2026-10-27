@@ -101,6 +101,7 @@ const env = {
   googleClientId: readEnv('GOOGLE_CLIENT_ID', ''),
   googleClientSecret: readEnv('GOOGLE_CLIENT_SECRET', ''),
   googleOAuthRedirectUri: readEnv('GOOGLE_OAUTH_REDIRECT_URI', `${process.env.SERVER_URL || 'http://localhost:4000'}/api/auth/google/callback`),
+  adminRegistrationKey: readEnv('ADMIN_REGISTRATION_KEY', ''),
   googleAuthAllowedReturnUrls: mergeLists(
     readList('ALLOWED_OAUTH_RETURN_URLS', []),
     [
@@ -169,12 +170,12 @@ const env = {
   imagekitPrivateKey: readEnv('IMAGEKIT_PRIVATE_KEY', ''),
   imagekitUrlEndpoint: readEnv('IMAGEKIT_URL_ENDPOINT', ''),
   imagekitFolder: readEnv('IMAGEKIT_FOLDER', '/profiles'),
+  imagekitMaxApkSizeBytes: 25 * 1024 * 1024,
   r2AccountId: readEnv('R2_ACCOUNT_ID', ''),
   r2AccessKeyId: readEnv('R2_ACCESS_KEY_ID', ''),
   r2SecretAccessKey: readEnv('R2_SECRET_ACCESS_KEY', ''),
   r2BucketName: readEnv('R2_BUCKET_NAME', ''),
   r2PublicBaseUrl: readEnv('R2_PUBLIC_BASE_URL', ''),
-  r2MaxApkSizeBytes: readPositiveNumber('R2_MAX_APK_SIZE_BYTES', 100 * 1024 * 1024),
   razorpayKeyId: readEnv('RAZORPAY_KEY_ID', ''),
   razorpayKeySecret: readEnv('RAZORPAY_KEY_SECRET', ''),
   razorpayWebhookSecret: readEnv('RAZORPAY_WEBHOOK_SECRET', ''),

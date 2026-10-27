@@ -27,16 +27,16 @@ test('allows regular users in the user Google sign-in flow', () => {
   }), false);
 });
 
-test('keeps the default Google sign-in flow restricted to active admins and developers', () => {
+test('does not allow administrator accounts to use Google user sign-in', () => {
   assert.equal(isGoogleOAuthAccountAllowed({
     emailAccount: { role: 'admin', isActive: true },
-  }), true);
+  }), false);
   assert.equal(isGoogleOAuthAccountAllowed({
     emailAccount: { role: 'dev', isActive: true },
-  }), true);
+  }), false);
   assert.equal(isGoogleOAuthAccountAllowed({
     emailAccount: { role: 'user', isActive: true },
-  }), false);
+  }), true);
   assert.equal(isGoogleOAuthAccountAllowed({
     emailAccount: { role: 'admin', isActive: false },
   }), false);

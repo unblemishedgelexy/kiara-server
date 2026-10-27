@@ -202,6 +202,10 @@ async function loginWithEmailPassword(email, password) {
     throw new Error('Please verify your email before logging in.');
   }
 
+  if (user.role !== 'user') {
+    throw new Error('Invalid email or password.');
+  }
+
   await accountDeletionService.cancelDeletionAfterLogin(user);
   
   // Reset failed attempts on successful login

@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const { randomUUID } = require('crypto');
 const cors = require('cors');
 const authRoutes = require('./routes/authRoutes');
+const adminAuthRoutes = require('./routes/adminAuthRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const passwordRoutes = require('./routes/passwordRoutes');
@@ -100,6 +101,7 @@ const createApp = () => {
     skip: (req) => {
       const originalPath = String(req.originalUrl || req.path).split('?')[0];
       const isRouteWithDedicatedAdmission = /^\/(?:api\/)?(?:auth|identity)(?:\/|$)/i.test(originalPath)
+        || /^\/api\/admin\/auth(?:\/|$)/i.test(originalPath)
         || /^\/(?:api\/)?live\/token$/i.test(originalPath)
         || /^\/api\/(?:profile|subscriptions)(?:\/|$)/i.test(originalPath);
       return isRouteWithDedicatedAdmission
@@ -109,6 +111,7 @@ const createApp = () => {
   app.use('/api', apiAdmission);
   app.use('/api/auth', authAdmission);
   app.use('/auth', authAdmission);
+  app.use('/api/admin/auth', authAdmission);
 
   app.use(bodyParser.json({
     verify: (req, _res, buf, encoding) => {
@@ -128,6 +131,7 @@ const createApp = () => {
 
   app.use('/api/auth', authRoutes);
   app.use('/auth', authRoutes);
+  app.use('/api/admin/auth', adminAuthRoutes);
   app.use('/api/profile', profileRoutes); 
   app.use('/api/subscriptions', subscriptionRoutes);
   app.use('/api/password', passwordRoutes);
