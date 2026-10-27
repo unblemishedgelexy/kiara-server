@@ -82,6 +82,7 @@ function publicContent(content) {
     features: content.features,
     apkAvailable: Boolean(content.apkUrl),
     apkDownloadUrl: apkDownloadUrl(content),
+    apkStorageProvider: content.apkStorageProvider || null,
     apkOriginalName: content.apkOriginalName,
     apkSize: content.apkSize,
     apkUploadedAt: content.apkUploadedAt,

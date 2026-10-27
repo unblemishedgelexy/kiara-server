@@ -64,6 +64,11 @@ const isNodeTest = process.env.NODE_TEST_CONTEXT === 'child-v8' || nodeEnv === '
 const env = {
   allowedOrigins: mergeLists(
     readList('ALLOWED_ORIGINS', []),
+    [
+      'https://kiaraai.netlify.app',
+      'http://localhost:5173',
+      'http://localhost:5174',
+    ],
     readList('CLIENT_ORIGIN', defaultClientOrigins),
     nodeEnv === 'production' ? [] : [
       'http://localhost:5173',
