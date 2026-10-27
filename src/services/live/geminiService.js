@@ -9,73 +9,12 @@ const {
   createPublicLiveSessionConfig,
   createLiveSessionConfig,
 } = require('./liveConfig');
-
-// Attempt to load optional system prompt builder (builds system prompt from working memory)
-let systemPromptBuilder = null;
-try {
-  systemPromptBuilder = require('./systemPromptBuilder');
-} catch (e) {
-  systemPromptBuilder = null;
-}
 const TRACE_FILE_PATH = path.resolve(__dirname, '..', '..', 'GEMINI_REQUEST_TRACE.md');
 const ENABLE_GEMINI_TRACE = process.env.GEMINI_TRACE === 'true';
 const CONCURRENCY_LIMIT = 5;
 const CIRCUIT_BREAKER_WINDOW_MS = 60 * 1000;
 const CIRCUIT_BREAKER_THRESHOLD = 6;
 const CIRCUIT_BREAKER_COOLDOWN_MS = 120 * 1000;
-const PROMPT_BUILDER_TIMEOUT_MS = 15000;
-const SYSTEM_PROMPT_CACHE_TTL_MS = 15000;
-const SESSION_PROMPT_CACHE_TTL_MS = 35 * 60 * 1000;
-const MAX_SESSION_PROMPT_CACHE_ENTRIES = 500;
-const systemPromptCache = new Map();
-const sessionPromptCache = new Map();
-
-function createPromptCacheKey(userId, sessionId, userQuery, activeContext) {
-  const normalizedQuery = String(userQuery || '').trim();
-  const normalizedContext = activeContext && typeof activeContext === 'object'
-    ? JSON.stringify(activeContext)
-    : '{}';
-  return `${userId || 'anonymous'}::${sessionId || 'anonymous'}::${normalizedQuery}::${normalizedContext}`;
-}
-
-function createSessionPromptCacheKey(userId, sessionId, traceId) {
-  return JSON.stringify([userId || 'anonymous', sessionId || 'anonymous', traceId || 'untraced']);
-}
-
-function getSessionPrompt(cacheKey, timestamp = Date.now()) {
-  const cachedPrompt = sessionPromptCache.get(cacheKey);
-  if (!cachedPrompt) return null;
-  if (timestamp - cachedPrompt.timestamp > SESSION_PROMPT_CACHE_TTL_MS) {
-    clearTimeout(cachedPrompt.cleanupTimer);
-    sessionPromptCache.delete(cacheKey);
-    return null;
-  }
-  return cachedPrompt;
-}
-
-function setSessionPrompt(cacheKey, prompt) {
-  const previous = sessionPromptCache.get(cacheKey);
-  if (previous) clearTimeout(previous.cleanupTimer);
-  sessionPromptCache.delete(cacheKey);
-  const entry = {
-    ...prompt,
-    timestamp: Date.now(),
-    cleanupTimer: setTimeout(() => {
-      if (sessionPromptCache.get(cacheKey) === entry) {
-        sessionPromptCache.delete(cacheKey);
-      }
-    }, SESSION_PROMPT_CACHE_TTL_MS),
-  };
-  entry.cleanupTimer.unref?.();
-  sessionPromptCache.set(cacheKey, entry);
-  while (sessionPromptCache.size > MAX_SESSION_PROMPT_CACHE_ENTRIES) {
-    const oldestKey = sessionPromptCache.keys().next().value;
-    const oldest = sessionPromptCache.get(oldestKey);
-    clearTimeout(oldest?.cleanupTimer);
-    sessionPromptCache.delete(oldestKey);
-  }
-}
-
 // Separate concurrency and circuit-breaker for background (text) vs live-critical calls.
 const geminiConcurrency = new Set();
 const geminiConcurrencyLive = new Set();
@@ -97,7 +36,7 @@ function initializeTraceFile() {
     if (!fs.existsSync(TRACE_FILE_PATH)) {
       fs.writeFileSync(
         TRACE_FILE_PATH,
-        '# Gemini Request Trace\n# timestamp | requestId | userId | sessionId | endpoint | retryCount | promptTokens | responseTokens | latency | status | concurrency\n'
+        '# Gemini Request Trace\n# timestamp | requestId | endpoint | retryCount | promptTokens | responseTokens | latency | status | concurrency\n'
       );
     }
   } catch (err) {
@@ -176,7 +115,7 @@ function writeTraceEntry(entry) {
   }
 
   try {
-    const line = `${new Date(entry.timestamp).toISOString()} | requestId=${entry.requestId} | userId=${entry.userId || 'unknown'} | sessionId=${entry.sessionId || 'unknown'} | endpoint=${entry.endpoint} | retryCount=${entry.retryCount} | promptTokens=${entry.promptTokens} | responseTokens=${entry.responseTokens} | latency=${entry.latency}ms | status=${entry.status} | concurrency=${entry.concurrency}`;
+    const line = `${new Date(entry.timestamp).toISOString()} | requestId=${entry.requestId} | endpoint=${entry.endpoint} | retryCount=${entry.retryCount} | promptTokens=${entry.promptTokens} | responseTokens=${entry.responseTokens} | latency=${entry.latency}ms | status=${entry.status} | concurrency=${entry.concurrency}`;
     fs.appendFileSync(TRACE_FILE_PATH, `${line}\n`);
   } catch (err) {
     console.error('[ERROR]', 'Failed to write Gemini trace:', err && err.message ? err.message : err);
@@ -378,11 +317,7 @@ async function summarizeConversation(input) {
 const LIVE_TOKEN_CREATION_TIMEOUT_MS = 12000;
 
 async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
-  const userQuery = options.userQuery || '';
-  const sessionId = options.sessionId || requestingUserId || 'anonymous';
-  const activeContext = options.activeContext || {};
   const lifecycleTrigger = options.lifecycleTrigger || 'LIVE_SESSION_START';
-  const traceId = String(options.traceId || `live-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
   if (!hasGeminiServerAccess()) {
     throw new Error('Gemini API key unavailable');
   }
@@ -393,141 +328,26 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   const expireTime = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
   const newSessionExpireTime = new Date(
     Date.now() + newSessionWindowSeconds * 1000
-  ).toISOString();
+  ).toISOString(  );
 
-  // Build dynamic system instruction including user memories only after the
-  // live session has met the stability gate. Until then, the live path stays
-  // intentionally minimal: user microphone -> Gemini Live -> response -> audio.
-  let dynamicSystemInstruction = LIVE_SYSTEM_INSTRUCTION;
-  let promptBuilderApplied = false;
-  let memoryRevision = 0;
-  let contextMemoryRevision = 0;
-  let memoryStatus = 'NOT_BUILT';
-  let memoryCount = 0;
-  let memoryContextHash = null;
-  let identityStatus = 'NOT_CHECKED';
   const tokenWillStartNewSession = lifecycleTrigger !== 'LIVE_TOKEN_REFRESH';
-  const sessionPromptCacheKey = createSessionPromptCacheKey(requestingUserId, sessionId, traceId);
-  const cachedSessionPrompt = lifecycleTrigger === 'LIVE_TOKEN_REFRESH'
-    ? getSessionPrompt(sessionPromptCacheKey)
-    : null;
-
-  if (cachedSessionPrompt) {
-    dynamicSystemInstruction = cachedSessionPrompt.systemInstruction;
-    promptBuilderApplied = true;
-    memoryRevision = Number(cachedSessionPrompt.memoryRevision) || 0;
-    contextMemoryRevision = Number(cachedSessionPrompt.contextMemoryRevision) || memoryRevision;
-    memoryStatus = cachedSessionPrompt.memoryStatus || 'UNKNOWN';
-    memoryCount = Number(cachedSessionPrompt.memoryCount) || 0;
-    memoryContextHash = cachedSessionPrompt.memoryContextHash || null;
-    identityStatus = cachedSessionPrompt.identityStatus || 'UNKNOWN';
-    setSessionPrompt(sessionPromptCacheKey, cachedSessionPrompt);
-  } else if (requestingUserId) {
-    if (!systemPromptBuilder) {
-      const error = new Error('Live system prompt builder is unavailable.');
-      error.code = 'SYSTEM_PROMPT_BUILDER_UNAVAILABLE';
-      throw error;
-    }
-
-    let promptBuilderTimeout = null;
-    let cacheKey = null;
-    try {
-      cacheKey = createPromptCacheKey(requestingUserId, sessionId, userQuery, activeContext);
-      const cachedPrompt = systemPromptCache.get(cacheKey);
-      const now = Date.now();
-      if (cachedPrompt
-        && !['RETRIEVAL_FAILURE', 'PARTIAL'].includes(cachedPrompt.memoryStatus)
-        && now - cachedPrompt.timestamp <= SYSTEM_PROMPT_CACHE_TTL_MS) {
-        dynamicSystemInstruction = cachedPrompt.systemInstruction;
-        promptBuilderApplied = true;
-        memoryRevision = Number(cachedPrompt.memoryRevision) || 0;
-        contextMemoryRevision = Number(cachedPrompt.contextMemoryRevision) || memoryRevision;
-        memoryStatus = cachedPrompt.memoryStatus || 'UNKNOWN';
-        memoryCount = Number(cachedPrompt.memoryCount) || 0;
-        memoryContextHash = cachedPrompt.memoryContextHash || null;
-        identityStatus = cachedPrompt.identityStatus || 'UNKNOWN';
-      } else {
-        const built = await Promise.race([
-          systemPromptBuilder.buildSystemPrompt(requestingUserId, {
-            tokenBudget: 1800,
-            trigger: 'session_start',
-            lifecycleTrigger,
-            userQuery,
-            sessionId,
-            activeContext,
-            traceId,
-          }),
-          new Promise((_, reject) => {
-            promptBuilderTimeout = setTimeout(
-              () => reject(new Error('systemPromptBuilder timeout')),
-              PROMPT_BUILDER_TIMEOUT_MS
-            );
-          }),
-        ]);
-        if (!built?.systemPrompt) {
-          const error = new Error('Live prompt initialization returned no instruction.');
-          error.code = 'EMPTY_SYSTEM_PROMPT';
-          throw error;
-        }
-
-        dynamicSystemInstruction = `${LIVE_SYSTEM_INSTRUCTION}\n\n${built.systemPrompt}`;
-        promptBuilderApplied = true;
-        memoryRevision = Number(built.memoryRevision) || 0;
-        contextMemoryRevision = Number(built.contextMemoryRevision) || memoryRevision;
-        memoryStatus = built.memoryStatus || 'UNKNOWN';
-        memoryCount = Number(built.memoryCount) || 0;
-        memoryContextHash = built.memoryContextHash || null;
-        identityStatus = built.identityStatus || 'UNKNOWN';
-        if (memoryStatus === 'RETRIEVAL_FAILURE' || memoryStatus === 'PARTIAL') {
-          systemPromptCache.delete(cacheKey);
-        } else {
-          systemPromptCache.set(cacheKey, {
-            systemInstruction: dynamicSystemInstruction,
-            memoryRevision,
-            contextMemoryRevision,
-            memoryStatus,
-            memoryCount,
-            memoryContextHash,
-            identityStatus,
-            timestamp: now,
-          });
-        }
-      }
-
-      if (memoryStatus === 'RETRIEVAL_FAILURE' || memoryStatus === 'PARTIAL') {
-        const previous = sessionPromptCache.get(sessionPromptCacheKey);
-        if (previous) clearTimeout(previous.cleanupTimer);
-        sessionPromptCache.delete(sessionPromptCacheKey);
-      } else {
-        setSessionPrompt(sessionPromptCacheKey, {
-          systemInstruction: dynamicSystemInstruction,
-          memoryRevision,
-          contextMemoryRevision,
-          memoryStatus,
-          memoryCount,
-          memoryContextHash,
-          identityStatus,
-        });
-      }
-    } catch (error) {
-      if (cacheKey) systemPromptCache.delete(cacheKey);
-      const previousSessionPrompt = sessionPromptCache.get(sessionPromptCacheKey);
-      if (previousSessionPrompt) clearTimeout(previousSessionPrompt.cleanupTimer);
-      sessionPromptCache.delete(sessionPromptCacheKey);
-      throw error;
-    } finally {
-      if (promptBuilderTimeout) clearTimeout(promptBuilderTimeout);
-    }
-  }
 
   const sessionConfig = createLiveSessionConfig({
     model: env.geminiLiveModel,
-    systemInstruction: dynamicSystemInstruction,
+    systemInstruction: LIVE_SYSTEM_INSTRUCTION,
     voiceName: env.geminiLiveVoice,
   });
   const liveConnectConfig = createLiveConnectConfig(sessionConfig);
 
-  const start = now();
+  const tokenAbortController = new AbortController();
+  const abortForCaller = () => tokenAbortController.abort();
+  if (options.signal?.aborted) {
+    tokenAbortController.abort();
+  } else {
+    options.signal?.addEventListener('abort', abortForCaller, { once: true });
+  }
+
+  const tokenCreationStartedAt = performance.now();
   const responsePromise = executeGeminiRequest({
     fn: async () => {
       return ai.authTokens.create({
@@ -535,6 +355,7 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
           uses: 1,
           expireTime,
           newSessionExpireTime,
+          abortSignal: tokenAbortController.signal,
           httpOptions: {
             apiVersion: 'v1alpha',
           },
@@ -553,7 +374,10 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   let tokenCreationTimeout;
   const timeoutPromise = new Promise((_, reject) => {
     tokenCreationTimeout = setTimeout(
-      () => reject(new Error('Live ephemeral token creation timed out.')),
+      () => {
+        tokenAbortController.abort();
+        reject(new Error('Live ephemeral token creation timed out.'));
+      },
       LIVE_TOKEN_CREATION_TIMEOUT_MS
     );
   });
@@ -561,15 +385,18 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   let response;
   try {
     response = await Promise.race([responsePromise, timeoutPromise]);
+  } catch (error) {
+    throw error;
   } finally {
     clearTimeout(tokenCreationTimeout);
+    options.signal?.removeEventListener('abort', abortForCaller);
   }
 
   if (!response?.name) {
     throw new Error('Failed to create Gemini live ephemeral token.');
   }
-  const dur = now() - start;
-  recordGeminiMetric('gemini_ephemeral_token_generation', dur, { userId: requestingUserId });
+  const dur = performance.now() - tokenCreationStartedAt;
+  recordGeminiMetric('gemini_ephemeral_token_generation', dur, { isLive: true });
 
   // Save mapping from token name -> requesting user id for audit/troubleshooting
   try {
@@ -587,10 +414,10 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
     expireTime,
     newSessionExpireTime,
     sessionConfig: createPublicLiveSessionConfig(sessionConfig),
-    memoryContextStatus: promptBuilderApplied ? memoryStatus : 'PROMPT_BUILD_FAILURE',
-    memoryContextCount: promptBuilderApplied ? memoryCount : 0,
-    memoryContextHash: promptBuilderApplied ? memoryContextHash : null,
-    identityStatus,
+    memoryContextStatus: 'DEFERRED_POST_CONNECT',
+    memoryContextCount: 0,
+    memoryContextHash: null,
+    identityStatus: 'DEFERRED_POST_CONNECT',
     instructionScope: tokenWillStartNewSession ? 'NEW_SESSION' : 'FUTURE_RECONNECT',
     lifecycleTrigger,
   };

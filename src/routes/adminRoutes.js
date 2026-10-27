@@ -13,7 +13,8 @@ const RazorpayPayment = require('../models/RazorpayPayment');
 const SupportRequest = require('../models/SupportRequest');
 const WebsiteContent = require('../models/WebsiteContent');
 const { uploadsDir } = require('../services/infrastructure/uploadService');
-const { uploadFileStreamToImageKit, deleteFileFromImageKit } = require('../services/imageService');
+const { deleteFileFromImageKit } = require('../services/imageService');
+const { deleteApkFromR2, isR2Configured, uploadApkToR2 } = require('../services/r2StorageService');
 const redisService = require('../services/infrastructure/redisService');
 const perfCollector = require('../middleware/perfCollector');
 const { env } = require('../config/env');
@@ -46,7 +47,7 @@ const apkUpload = multer({
     }
     return callback(null, true);
   },
-  limits: { fileSize: env.imagekitMaxApkSizeBytes, files: 1 },
+  limits: { fileSize: env.r2MaxApkSizeBytes, files: 1 },
 });
 
 function pageOptions(query) {
@@ -68,11 +69,15 @@ function publicContent(content) {
     heroDescription: content.heroDescription,
     features: content.features,
     apkAvailable: Boolean(content.apkUrl),
-    apkDownloadUrl: content.apkUrl ? `${content.apkUrl}${content.apkUrl.includes('?') ? '&' : '?'}ik-attachment=true` : null,
+    apkDownloadUrl: content.apkUrl
+      ? content.apkStorageProvider === 'r2'
+        ? content.apkUrl
+        : `${content.apkUrl}${content.apkUrl.includes('?') ? '&' : '?'}ik-attachment=true`
+      : null,
     apkOriginalName: content.apkOriginalName,
     apkSize: content.apkSize,
     apkUploadedAt: content.apkUploadedAt,
-    apkMaxSizeBytes: env.imagekitMaxApkSizeBytes,
+    apkMaxSizeBytes: env.r2MaxApkSizeBytes,
   };
 }
 
@@ -325,17 +330,24 @@ router.patch('/admin/content', requireRoles('admin'), async (req, res, next) => 
 });
 
 router.post('/admin/content/apk', requireRoles('admin', 'dev'), (req, res, next) => {
+  if (!isR2Configured()) {
+    return res.status(503).json({
+      success: false,
+      message: 'Cloudflare R2 is not configured. Add the R2 bucket credentials and public URL to the server environment.',
+    });
+  }
+
   apkUpload.single('apk')(req, res, async (uploadError) => {
     if (uploadError) {
       const message = uploadError.code === 'LIMIT_FILE_SIZE'
-        ? `APK exceeds the configured ImageKit upload limit of ${Math.floor(env.imagekitMaxApkSizeBytes / (1024 * 1024))} MB.`
+        ? `APK exceeds the configured Cloudflare R2 upload limit of ${Math.floor(env.r2MaxApkSizeBytes / (1024 * 1024))} MB.`
         : uploadError.message;
       return res.status(uploadError.code === 'LIMIT_FILE_SIZE' ? 413 : 400)
         .json({ success: false, message });
     }
     if (!req.file) return res.status(400).json({ success: false, message: 'Choose an Android .apk file.' });
 
-    let uploadedFileId;
+    let uploadedStorageKey;
     try {
       const handle = await fs.open(req.file.path, 'r');
       const signature = Buffer.alloc(8);
@@ -349,22 +361,29 @@ router.post('/admin/content/apk', requireRoles('admin', 'dev'), (req, res, next)
       }
 
       const safeOriginalName = path.basename(req.file.originalname).replace(/[^\w.-]+/g, '-').slice(-120) || 'kiara.apk';
-      const imagekitResult = await uploadFileStreamToImageKit(
-        req.file.path,
-        safeOriginalName,
-        '/kiara-ai/apk',
-      );
-      if (!imagekitResult.url || !imagekitResult.fileId) {
-        throw new Error('ImageKit did not return an APK URL and file ID.');
+      let r2Result;
+      try {
+        r2Result = await uploadApkToR2(req.file.path, safeOriginalName);
+      } catch (error) {
+        console.error('[ADMIN_APK_R2_UPLOAD_FAILED]', error?.name || 'CloudflareR2Error', error?.code || 'UNKNOWN');
+        return res.status(502).json({
+          success: false,
+          message: 'Cloudflare R2 could not store this APK. Check the R2 bucket credentials and object permissions, then try again.',
+        });
       }
-      uploadedFileId = imagekitResult.fileId;
-      const existing = await WebsiteContent.findById('public').select('apkFileId').lean();
+      if (!r2Result.url || !r2Result.key) {
+        throw new Error('Cloudflare R2 did not return an APK URL and object key.');
+      }
+      uploadedStorageKey = r2Result.key;
+      const existing = await WebsiteContent.findById('public').select('apkFileId apkStorageProvider apkStorageKey').lean();
       const updated = await WebsiteContent.findByIdAndUpdate(
         'public',
         {
           $set: {
-            apkFileId: imagekitResult.fileId,
-            apkUrl: imagekitResult.url,
+            apkFileId: null,
+            apkStorageProvider: 'r2',
+            apkStorageKey: r2Result.key,
+            apkUrl: r2Result.url,
             apkOriginalName: safeOriginalName,
             apkSize: req.file.size,
             apkUploadedAt: new Date(),
@@ -373,16 +392,20 @@ router.post('/admin/content/apk', requireRoles('admin', 'dev'), (req, res, next)
         },
         { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
       ).lean();
-      if (existing?.apkFileId && existing.apkFileId !== imagekitResult.fileId) {
+      if (existing?.apkStorageProvider === 'r2' && existing.apkStorageKey && existing.apkStorageKey !== r2Result.key) {
+        await deleteApkFromR2(existing.apkStorageKey).catch((error) => {
+          console.error('[ADMIN_APK_CLEANUP_FAILED]', error?.name || error?.code || 'CloudflareR2Error');
+        });
+      } else if (existing?.apkFileId) {
         await deleteFileFromImageKit(existing.apkFileId).catch((error) => {
-          console.error('[ADMIN_APK_CLEANUP_FAILED]', error?.name || error?.code || 'ImageKitError');
+          console.error('[ADMIN_LEGACY_APK_CLEANUP_FAILED]', error?.name || error?.code || 'ImageKitError');
         });
       }
       return res.status(201).json({ success: true, data: publicContent(updated) });
     } catch (error) {
-      if (uploadedFileId) {
-        await deleteFileFromImageKit(uploadedFileId).catch((cleanupError) => {
-          console.error('[ADMIN_APK_ROLLBACK_FAILED]', cleanupError?.name || cleanupError?.code || 'ImageKitError');
+      if (uploadedStorageKey) {
+        await deleteApkFromR2(uploadedStorageKey).catch((cleanupError) => {
+          console.error('[ADMIN_APK_ROLLBACK_FAILED]', cleanupError?.name || cleanupError?.code || 'CloudflareR2Error');
         });
       }
       return next(error);
@@ -398,14 +421,18 @@ router.post('/admin/content/apk', requireRoles('admin', 'dev'), (req, res, next)
 
 router.delete('/admin/content/apk', requireRoles('admin'), async (_req, res, next) => {
   try {
-    const existing = await WebsiteContent.findById('public').select('apkFileId').lean();
-    if (!existing?.apkFileId) {
+    const existing = await WebsiteContent.findById('public').select('apkFileId apkStorageProvider apkStorageKey apkUrl').lean();
+    if (!existing?.apkUrl) {
       return res.status(404).json({ success: false, message: 'There is no published APK to remove.' });
     }
-    await deleteFileFromImageKit(existing.apkFileId);
+    if (existing.apkStorageProvider === 'r2' && existing.apkStorageKey) {
+      await deleteApkFromR2(existing.apkStorageKey);
+    } else if (existing.apkFileId) {
+      await deleteFileFromImageKit(existing.apkFileId);
+    }
     const updated = await WebsiteContent.findByIdAndUpdate(
       'public',
-      { $set: { apkFileId: null, apkUrl: null, apkOriginalName: null, apkSize: null, apkUploadedAt: null } },
+      { $set: { apkFileId: null, apkStorageProvider: null, apkStorageKey: null, apkUrl: null, apkOriginalName: null, apkSize: null, apkUploadedAt: null } },
       { new: true },
     ).lean();
     return res.json({ success: true, data: publicContent(updated) });

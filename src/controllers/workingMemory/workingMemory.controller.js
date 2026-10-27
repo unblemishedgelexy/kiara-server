@@ -13,6 +13,7 @@
  */
 
 const MemoryService         = require('../../services/memory');
+const { getLiveTokenTraceId } = require('../../services/live/liveTokenTiming');
 
 const WorkingMemoryController = {
 
@@ -77,14 +78,15 @@ const WorkingMemoryController = {
   /**
    * GET /api/working-memory/context?userId=...&limit=...
    */
-  async getMemoryContext(req, res) {
-    try {
+   async getMemoryContext(req, res) {
+     const traceId = getLiveTokenTraceId(req);
+     try {
       const { userId, limit, userQuery } = req.query;
       const result = userQuery
         ? await MemoryService.prepareContext(userId, {
           userQuery: String(userQuery),
           sessionId: req.query.sessionId || userId,
-          traceId: String(req.headers['x-kiara-trace-id'] || req.headers['x-request-id'] || 'untraced'),
+          traceId,
         })
         : await MemoryService.buildWorkingMemoryContext(userId, '', '', parseInt(limit) || 20);
       return res.status(200).json(result);

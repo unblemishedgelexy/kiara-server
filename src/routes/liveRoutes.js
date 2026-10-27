@@ -22,6 +22,7 @@ const authMiddleware = require('../middleware/authMiddleware');
 const redisAbuseProtection = require('../middleware/redisAbuseProtection');
 const subscriptionUsageService = require('../services/subscriptions/usageService');
 const { getSessionFeedbackBlockStatus } = require('../controllers/supportController');
+const { getLiveTokenTraceId } = require('../services/live/liveTokenTiming');
 
 const router = express.Router();
 const protectExpensive = redisAbuseProtection({ scope: 'account-ip', bucket: 'expensive' });
@@ -31,6 +32,27 @@ const geminiHealth = require('../services/../services/live/geminiHealth');
 
 const MAX_ATTACHMENT_COUNT = 5;
 const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+function getSafeLiveErrorMetadata(error) {
+  const errorName = typeof error?.name === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(error.name)
+    ? error.name
+    : 'Error';
+  const errorCode = typeof error?.code === 'string' && /^[A-Za-z0-9_.-]{1,48}$/.test(error.code)
+    ? error.code
+    : null;
+  return { errorName, errorCode };
+}
+
+async function abortLiveUsageReservation(traceId, userId, sessionId) {
+  try {
+    await subscriptionUsageService.abortLiveSession(userId, sessionId);
+  } catch (error) {
+    console.error('[LIVE_USAGE_RESERVATION_CLEANUP_FAILED]', JSON.stringify({
+      traceId,
+      ...getSafeLiveErrorMetadata(error),
+    }));
+  }
+}
+
 const attachmentStorage = {
   _handleFile(req, file, callback) {
     const filename = `${randomUUID()}${path.extname(file.originalname).toLowerCase()}`;
@@ -478,6 +500,7 @@ router.post('/tts', authMiddleware, protectExpensive, async (req, res) => {
  */
 router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
   const userId = req.userId || null;
+  const traceId = getLiveTokenTraceId(req);
   if (
     userId
     && env.nodeEnv === 'production'
@@ -502,14 +525,6 @@ router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
       });
     }
   }
-
-  const traceId =
-    req.headers['x-kiara-trace-id'] ||
-    req.headers['X-Kiara-Trace-Id'] ||
-    req.body?.traceId ||
-    `live-token-${Date.now().toString(36)}-${Math.random()
-      .toString(36)
-      .slice(2, 8)}`;
 
   if (!env.geminiApiKey) {
     res.status(200).json({
@@ -566,14 +581,25 @@ router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
   }
 
   try {
-    const token = await createLiveEphemeralToken(userId, {
-      userQuery,
-      sessionId,
-      activeContext,
-      lifecycleTrigger:
-        req.lifecycleTrigger || 'LIVE_SESSION_START',
-      traceId,
-    });
+    const tokenAbortController = new AbortController();
+    const abortIfClientClosed = () => {
+      if (!res.writableEnded) tokenAbortController.abort();
+    };
+    res.once('close', abortIfClientClosed);
+    let token;
+    try {
+      token = await createLiveEphemeralToken(userId, {
+        userQuery,
+        sessionId,
+        activeContext,
+        lifecycleTrigger:
+          req.lifecycleTrigger || 'LIVE_SESSION_START',
+        traceId,
+        signal: tokenAbortController.signal,
+      });
+    } finally {
+      res.removeListener('close', abortIfClientClosed);
+    }
 
     if (
       !token ||
@@ -586,7 +612,7 @@ router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
       );
 
       if (userId && createdMeteringSession && meteringSessionId) {
-        await subscriptionUsageService.abortLiveSession(userId, meteringSessionId).catch(() => undefined);
+        await abortLiveUsageReservation(traceId, userId, meteringSessionId);
       }
 
       res.status(502).json({
@@ -616,8 +642,9 @@ router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
     res.status(200).json(payload);
   } catch (error) {
     if (userId && createdMeteringSession && meteringSessionId) {
-      await subscriptionUsageService.abortLiveSession(userId, meteringSessionId).catch(() => undefined);
+      await abortLiveUsageReservation(traceId, userId, meteringSessionId);
     }
+    if (res.destroyed || res.writableEnded) return;
     const errorMessage =
       error instanceof Error
         ? error.message
