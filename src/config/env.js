@@ -66,6 +66,7 @@ const env = {
     readList('ALLOWED_ORIGINS', []),
     [
       'https://kiaraai.netlify.app',
+      'https://kiaraai.in',
       'http://localhost:5173',
       'http://localhost:5174',
     ],
