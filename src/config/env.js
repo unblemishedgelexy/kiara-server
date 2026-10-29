@@ -60,6 +60,7 @@ const defaultClientOrigins = [
 
 const nodeEnv = readEnv('NODE_ENV', 'development');
 const isNodeTest = process.env.NODE_TEST_CONTEXT === 'child-v8' || nodeEnv === 'test';
+const pineconeConfigured = Boolean(readEnv('PINECONE_API_KEY', '')) && Boolean(readEnv('PINECONE_INDEX_NAME', ''));
 
 const env = {
   allowedOrigins: mergeLists(
@@ -148,10 +149,10 @@ const env = {
   memoryMongoQueryTimeoutMs: readPositiveNumber('MEMORY_MONGO_QUERY_TIMEOUT_MS', 3000),
   memoryGroqQueryPlannerEnabled: nodeEnv === 'development' && !isNodeTest
     && readEnv('MEMORY_GROQ_QUERY_PLANNER_ENABLED', 'false').toLowerCase() === 'true',
-  enablePinecone: readEnv('ENABLE_PINECONE', 'true').toLowerCase() === 'true',
+  enablePinecone: pineconeConfigured && readEnv('ENABLE_PINECONE', 'false').toLowerCase() === 'true',
   enableQueue: readEnv('ENABLE_QUEUE', 'true').toLowerCase() === 'true',
   certificationMode: readEnv('CERTIFICATION_MODE', 'false').toLowerCase() === 'true',
-  enablePromotionWorker: readEnv('ENABLE_PROMOTION_WORKER', 'true').toLowerCase() === 'true',
+  enablePromotionWorker: pineconeConfigured && readEnv('ENABLE_PROMOTION_WORKER', 'false').toLowerCase() === 'true',
   promotionWorkerLimit: readNumber('PROMOTION_WORKER_LIMIT', 20),
   enableProfileCache: readEnv('ENABLE_PROFILE_CACHE', 'true').toLowerCase() === 'true',
   enableUnfinishedContext: readEnv('ENABLE_UNFINISHED_CONTEXT', 'true').toLowerCase() === 'true',
