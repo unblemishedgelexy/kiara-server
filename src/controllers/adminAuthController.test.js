@@ -4,7 +4,6 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { env } = require('../config/env');
 const Admin = require('../models/Admin');
-const User = require('../models/User');
 const authService = require('../services/auth/authService');
 const {
   hasAdminPasswordAccess,
@@ -42,31 +41,23 @@ test('admin registration key must be configured and match exactly', () => {
   }
 });
 
-test('first admin registration succeeds without a key despite a matching regular user email', async () => {
+test('first-admin bootstrap is disabled even with the registration key', async () => {
   const originals = {
     registrationKey: env.adminRegistrationKey,
     adminFindOne: Admin.findOne,
-    userFindOne: User.findOne,
-    createIndex: Admin.collection.createIndex,
     countDocuments: Admin.countDocuments,
     create: Admin.create,
     hashPassword: authService.hashPassword,
   };
-  let createdAdmin;
-  let userLookupCalled = false;
+  let accountCreated = false;
   const response = createResponse();
   try {
-    env.adminRegistrationKey = '';
+    env.adminRegistrationKey = 'secure-test-registration-key';
     Admin.findOne = async () => null;
-    User.findOne = async () => {
-      userLookupCalled = true;
-      return { role: 'user', email: 'admin@example.com' };
-    };
-    Admin.collection.createIndex = async () => 'unique_initial_admin';
     Admin.countDocuments = async () => 0;
-    Admin.create = async (data) => {
-      createdAdmin = data;
-      return { ...data, id: 'initial-admin-id' };
+    Admin.create = async () => {
+      accountCreated = true;
+      throw new Error('First-admin bootstrap must remain disabled.');
     };
     authService.hashPassword = async () => 'password-hash';
 
@@ -77,40 +68,40 @@ test('first admin registration succeeds without a key despite a matching regular
         email: 'admin@example.com',
         password: 'a-long-password',
       } },
-      get: () => undefined,
+      get: () => env.adminRegistrationKey,
     }, response, (error) => { throw error; });
 
-    assert.equal(response.statusCode, 201);
-    assert.equal(response.body.success, true);
-    assert.equal(createdAdmin.isInitialAdmin, true);
-    assert.equal(createdAdmin.role, 'admin');
-    assert.equal(userLookupCalled, false);
+    assert.equal(response.statusCode, 403);
+    assert.match(response.body.message, /first-admin bootstrap is disabled/i);
+    assert.equal(accountCreated, false);
   } finally {
     env.adminRegistrationKey = originals.registrationKey;
     Admin.findOne = originals.adminFindOne;
-    User.findOne = originals.userFindOne;
-    Admin.collection.createIndex = originals.createIndex;
     Admin.countDocuments = originals.countDocuments;
     Admin.create = originals.create;
     authService.hashPassword = originals.hashPassword;
   }
 });
 
-test('later admin registrations require the configured registration key', async () => {
+test('additional admin registration requires the configured key', async () => {
   const originals = {
     registrationKey: env.adminRegistrationKey,
     findOne: Admin.findOne,
-    createIndex: Admin.collection.createIndex,
     countDocuments: Admin.countDocuments,
     create: Admin.create,
+    hashPassword: authService.hashPassword,
   };
+  let createdAdmin;
   const response = createResponse();
   try {
-    env.adminRegistrationKey = '';
+    env.adminRegistrationKey = 'secure-test-registration-key';
     Admin.findOne = async () => null;
-    Admin.collection.createIndex = async () => 'unique_initial_admin';
     Admin.countDocuments = async () => 1;
-    Admin.create = async () => { throw new Error('Must not create a second unkeyed admin.'); };
+    Admin.create = async (data) => {
+      createdAdmin = data;
+      return { ...data, id: 'additional-admin-id' };
+    };
+    authService.hashPassword = async () => 'password-hash';
 
     await register({
       validated: { body: {
@@ -122,56 +113,38 @@ test('later admin registrations require the configured registration key', async 
       get: () => undefined,
     }, response, (error) => { throw error; });
 
-    assert.equal(response.statusCode, 503);
-    assert.match(response.body.message, /configure ADMIN_REGISTRATION_KEY/i);
-  } finally {
-    env.adminRegistrationKey = originals.registrationKey;
-    Admin.findOne = originals.findOne;
-    Admin.collection.createIndex = originals.createIndex;
-    Admin.countDocuments = originals.countDocuments;
-    Admin.create = originals.create;
-  }
-});
-
-test('a concurrent first-admin bootstrap loser receives a conflict', async () => {
-  const originals = {
-    registrationKey: env.adminRegistrationKey,
-    findOne: Admin.findOne,
-    createIndex: Admin.collection.createIndex,
-    countDocuments: Admin.countDocuments,
-    create: Admin.create,
-    hashPassword: authService.hashPassword,
-  };
-  const response = createResponse();
-  try {
-    env.adminRegistrationKey = '';
-    Admin.findOne = async () => null;
-    Admin.collection.createIndex = async () => 'unique_initial_admin';
-    Admin.countDocuments = async () => 0;
-    Admin.create = async () => {
-      throw Object.assign(new Error('duplicate initial admin'), {
-        code: 11000,
-        keyPattern: { isInitialAdmin: 1 },
-      });
-    };
-    authService.hashPassword = async () => 'password-hash';
+    assert.equal(response.statusCode, 401);
+    assert.match(response.body.message, /invalid admin registration key/i);
 
     await register({
       validated: { body: {
-        firstName: 'Concurrent',
+        firstName: 'Second',
         lastName: 'Admin',
-        email: 'concurrent@example.com',
+        email: 'second@example.com',
         password: 'another-long-password',
       } },
-      get: () => undefined,
+      get: () => 'wrong-registration-key',
     }, response, (error) => { throw error; });
 
-    assert.equal(response.statusCode, 409);
-    assert.match(response.body.message, /already been created/i);
+    assert.equal(response.statusCode, 401);
+
+    await register({
+      validated: { body: {
+        firstName: 'Second',
+        lastName: 'Admin',
+        email: 'second@example.com',
+        password: 'another-long-password',
+      } },
+      get: () => env.adminRegistrationKey,
+    }, response, (error) => { throw error; });
+
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.body.success, true);
+    assert.equal(createdAdmin.role, 'admin');
+    assert.equal(Object.hasOwn(createdAdmin, 'isInitialAdmin'), false);
   } finally {
     env.adminRegistrationKey = originals.registrationKey;
     Admin.findOne = originals.findOne;
-    Admin.collection.createIndex = originals.createIndex;
     Admin.countDocuments = originals.countDocuments;
     Admin.create = originals.create;
     authService.hashPassword = originals.hashPassword;

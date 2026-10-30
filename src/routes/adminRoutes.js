@@ -30,9 +30,9 @@ const apkDirectory = path.resolve(uploadsDir, 'admin-apk-temp');
 const defaultContent = {
   announcement: '',
   heroEyebrow: 'YOUR AI COMPANION',
-  heroTitle: 'A little closer to the future.',
-  heroDescription: 'Meet Kiara — a thoughtful AI companion who listens, remembers, and grows with you.',
-  features: ['Natural voice and chat', 'A companion that remembers', 'Your own expressive 3D avatar'],
+  heroTitle: 'A thoughtful companion for real conversations.',
+  heroDescription: 'Meet Kiara, an Android AI companion for everyday conversations, clearer expression, and personal reflection.',
+  features: ['Voice and text conversations', 'Context-aware memory', 'An expressive 3D avatar'],
 };
 
 const apkUpload = multer({

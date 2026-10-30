@@ -5,17 +5,17 @@ const websiteContentSchema = new mongoose.Schema(
     _id: { type: String, default: 'public' },
     announcement: { type: String, default: '' },
     heroEyebrow: { type: String, default: 'YOUR AI COMPANION' },
-    heroTitle: { type: String, default: 'A little closer to the future.' },
+    heroTitle: { type: String, default: 'A thoughtful companion for real conversations.' },
     heroDescription: {
       type: String,
-      default: 'Meet Kiara — a thoughtful AI companion who listens, remembers, and grows with you.',
+      default: 'Meet Kiara, an Android AI companion for everyday conversations, clearer expression, and personal reflection.',
     },
     features: {
       type: [String],
       default: [
-        'Natural voice and chat',
-        'A companion that remembers',
-        'Your own expressive 3D avatar',
+        'Voice and text conversations',
+        'Context-aware memory',
+        'An expressive 3D avatar',
       ],
     },
     apkFileId: { type: String, default: null },

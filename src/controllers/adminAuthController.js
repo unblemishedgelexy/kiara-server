@@ -24,27 +24,26 @@ function hasAdminPasswordAccess(admin) {
 async function register(req, res, next) {
   const { firstName, lastName, email, password } = req.validated.body;
   try {
+    if (!env.adminRegistrationKey) {
+      return res.status(503).json({
+        success: false,
+        message: 'Admin registration is disabled until ADMIN_REGISTRATION_KEY is configured on the server.',
+      });
+    }
+    if (!isRegistrationKeyValid(req.get('x-admin-registration-key'))) {
+      return res.status(401).json({ success: false, message: 'Invalid admin registration key.' });
+    }
+
+    if (await Admin.countDocuments({}) === 0) {
+      return res.status(403).json({
+        success: false,
+        message: 'First-admin bootstrap is disabled. Provision the initial admin through a controlled server-side process.',
+      });
+    }
+
     const existing = await Admin.findOne({ email });
     if (existing) {
       return res.status(409).json({ success: false, message: 'An admin account with this email already exists.' });
-    }
-
-    await Admin.collection.createIndex(
-      { isInitialAdmin: 1 },
-      { unique: true, partialFilterExpression: { isInitialAdmin: true }, name: 'unique_initial_admin' },
-    );
-    const adminCount = await Admin.countDocuments({});
-    const isInitialAdmin = adminCount === 0;
-    if (!isInitialAdmin) {
-      if (!env.adminRegistrationKey) {
-        return res.status(503).json({
-          success: false,
-          message: 'Keyless admin setup is only available before the first account exists. Configure ADMIN_REGISTRATION_KEY to create an admin account now.',
-        });
-      }
-      if (!isRegistrationKeyValid(req.get('x-admin-registration-key'))) {
-        return res.status(401).json({ success: false, message: 'Invalid admin registration key.' });
-      }
     }
 
     const adminData = {
@@ -57,7 +56,6 @@ async function register(req, res, next) {
       role: 'admin',
       isActive: true,
     };
-    if (isInitialAdmin) adminData.isInitialAdmin = true;
     const admin = await Admin.create(adminData);
     return res.status(201).json({
       success: true,
@@ -74,12 +72,6 @@ async function register(req, res, next) {
     });
   } catch (error) {
     if (error?.code === 11000) {
-      if (error.keyPattern?.isInitialAdmin) {
-        return res.status(409).json({
-          success: false,
-          message: 'The first admin account has already been created. Use the admin login instead.',
-        });
-      }
       return res.status(409).json({
         success: false,
         message: 'An admin account with this email already exists.',
