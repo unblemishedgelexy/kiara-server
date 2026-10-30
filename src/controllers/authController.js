@@ -2,9 +2,11 @@ const authService = require('../services/../services/auth/authService');
 const { verifyRefreshToken } = require('../services/../services/auth/tokenService');
 const { generateAccessToken, generateRefreshToken } = require('../services/../services/auth/tokenService');
 const UserModel = require('../models/User');
+const AdminModel = require('../models/Admin');
 const bcrypt = require('bcryptjs');
 const googleOAuthService = require('../services/../services/auth/googleOAuthService');
-const { isGoogleOAuthAccountAllowed } = require('../services/auth/googleOAuthPolicy');
+const { getGoogleOAuthAccountDenialReason } = require('../services/auth/googleOAuthPolicy');
+const { separateLegacyAdminAccount } = require('../services/auth/legacyAdminSeparation');
 
 
 function buildAuthPayload(user, accessToken, refreshToken) {
@@ -228,23 +230,34 @@ async function handleGoogleCallback(req, res, next) {
 
     const normalizedEmail = googleUser.email.toLowerCase();
     const [emailAccount, linkedGoogleAccount] = await Promise.all([
-      UserModel.findOne({ email: normalizedEmail }).select('googleId role isActive').lean(),
+      UserModel.findOne({ email: normalizedEmail })
+        .select('_id email googleId role isActive firstName lastName displayName passwordHash emailVerified lastLogin')
+        .lean(),
       UserModel.findOne({ googleId: googleUser.googleId }).select('email').lean(),
     ]);
     const googleIdMismatch = emailAccount?.googleId && emailAccount.googleId !== googleUser.googleId;
     const emailMismatch = linkedGoogleAccount && linkedGoogleAccount.email.toLowerCase() !== normalizedEmail;
     const purpose = authState.purpose || 'user';
-    if (!isGoogleOAuthAccountAllowed({
+    if (
+      emailAccount &&
+      ['admin', 'dev'].includes(emailAccount.role) &&
+      !googleIdMismatch &&
+      !emailMismatch
+    ) {
+      await separateLegacyAdminAccount(emailAccount, { AdminModel, UserModel });
+    }
+    const denialReason = getGoogleOAuthAccountDenialReason({
       purpose,
       emailAccount,
       googleIdMismatch: Boolean(googleIdMismatch),
       emailMismatch: Boolean(emailMismatch),
-    })) {
+    });
+    if (denialReason) {
       returnUrl.searchParams.set('status', 'denied');
-      returnUrl.searchParams.set(
-        'message',
-        'This Google account is not eligible for regular user sign-in.',
-      );
+      returnUrl.searchParams.set('code', denialReason);
+      returnUrl.searchParams.set('message', denialReason === 'admin_account'
+        ? 'This email is configured as an administrator account. Use the separate admin sign-in route.'
+        : 'This Google account does not match the account linked to this email.');
       return res.redirect(303, returnUrl.toString());
     }
 
@@ -263,7 +276,17 @@ async function handleGoogleCallback(req, res, next) {
     console.error('[authController] Google callback failed:', error?.name || 'OAuthCallbackError', error?.code || 'UNKNOWN');
     if (returnUrl) {
       returnUrl.searchParams.set('status', 'error');
-      returnUrl.searchParams.set('message', 'Google sign-in could not be completed. Please try again.');
+      const recoverableAccountError = [
+        'ACCOUNT_INACTIVE',
+        'ACCOUNT_DELETION_FINALIZED',
+        'ACCOUNT_DELETION_REACTIVATION_FAILED',
+      ].includes(error?.code);
+      returnUrl.searchParams.set(
+        'message',
+        recoverableAccountError
+          ? error.message
+          : 'Google sign-in could not be completed. Please try again.',
+      );
       return res.redirect(303, returnUrl.toString());
     }
     return res.status(500).json({ success: false, message: 'Google authentication failed.' });

@@ -1,17 +1,31 @@
 'use strict';
 
-function isGoogleOAuthAccountAllowed({
+function getGoogleOAuthAccountDenialReason({
   purpose = 'user',
   emailAccount,
   googleIdMismatch = false,
   emailMismatch = false,
 }) {
-  if (googleIdMismatch || emailMismatch) {
-    return false;
+  if (purpose !== 'user') {
+    return 'unsupported_purpose';
   }
 
-  return purpose === 'user'
-    && (!emailAccount || (emailAccount.role === 'user' && emailAccount.isActive === true));
+  if (googleIdMismatch || emailMismatch) {
+    return 'identity_mismatch';
+  }
+
+  if (emailAccount && emailAccount.role !== 'user') {
+    return 'admin_account';
+  }
+
+  return null;
 }
 
-module.exports = { isGoogleOAuthAccountAllowed };
+function isGoogleOAuthAccountAllowed(options) {
+  return getGoogleOAuthAccountDenialReason(options) === null;
+}
+
+module.exports = {
+  getGoogleOAuthAccountDenialReason,
+  isGoogleOAuthAccountAllowed,
+};

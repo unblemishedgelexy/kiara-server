@@ -2,9 +2,12 @@
 
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { isGoogleOAuthAccountAllowed } = require('./googleOAuthPolicy');
+const {
+  getGoogleOAuthAccountDenialReason,
+  isGoogleOAuthAccountAllowed,
+} = require('./googleOAuthPolicy');
 
-test('allows regular users in the user Google sign-in flow', () => {
+test('allows regular users and lets account reactivation validate inactive accounts', () => {
   assert.equal(isGoogleOAuthAccountAllowed({
     purpose: 'user',
     emailAccount: { role: 'user', isActive: true },
@@ -16,7 +19,7 @@ test('allows regular users in the user Google sign-in flow', () => {
   assert.equal(isGoogleOAuthAccountAllowed({
     purpose: 'user',
     emailAccount: { role: 'user', isActive: false },
-  }), false);
+  }), true);
   assert.equal(isGoogleOAuthAccountAllowed({
     purpose: 'user',
     emailAccount: { role: 'admin', isActive: true },
@@ -55,4 +58,20 @@ test('rejects Google identity conflicts in either sign-in flow', () => {
     emailAccount: { role: 'admin', isActive: true },
     googleIdMismatch: true,
   }), false);
+});
+
+test('reports whether user Google sign-in was denied for an admin or identity conflict', () => {
+  assert.equal(getGoogleOAuthAccountDenialReason({
+    emailAccount: { role: 'admin', isActive: true },
+  }), 'admin_account');
+  assert.equal(getGoogleOAuthAccountDenialReason({
+    emailAccount: { role: 'user', isActive: true },
+    googleIdMismatch: true,
+  }), 'identity_mismatch');
+  assert.equal(getGoogleOAuthAccountDenialReason({
+    emailAccount: { role: 'user', isActive: false },
+  }), null);
+  assert.equal(getGoogleOAuthAccountDenialReason({
+    purpose: 'admin',
+  }), 'unsupported_purpose');
 });
