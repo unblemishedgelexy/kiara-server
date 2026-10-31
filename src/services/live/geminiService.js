@@ -351,34 +351,17 @@ async function createLiveTokenThroughGateway({
   const signature = createHmac('sha256', env.liveGatewayHmacSecret)
     .update(`${timestamp}.${nonce}.${bodyHash}`)
     .digest('hex');
-  let response;
-  try {
-    response = await fetch(gatewayUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-kiara-timestamp': timestamp,
-        'x-kiara-nonce': nonce,
-        'x-kiara-signature': signature,
-      },
-      body,
-      signal,
-    });
-  } catch (error) {
-    const errorCode = typeof error?.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(error.code)
-      ? error.code
-      : error?.name === 'AbortError' ? 'ABORTED' : 'NETWORK_ERROR';
-    console.error('[LIVE_GATEWAY_CONNECTION]', JSON.stringify({
-      status: 'unreachable',
-      errorCode,
-    }));
-    throw error;
-  }
-
-  console.info('[LIVE_GATEWAY_CONNECTION]', JSON.stringify({
-    status: 'reachable',
-    httpStatus: response.status,
-  }));
+  const response = await fetch(gatewayUrl, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-kiara-timestamp': timestamp,
+      'x-kiara-nonce': nonce,
+      'x-kiara-signature': signature,
+    },
+    body,
+    signal,
+  });
 
   if (!response.ok) {
     const error = new Error(
@@ -391,16 +374,6 @@ async function createLiveTokenThroughGateway({
   }
 
   const result = await response.json();
-  if (typeof result?.token !== 'string' || !result.token) {
-    console.error('[LIVE_GATEWAY_TOKEN_RESPONSE_INVALID]', JSON.stringify({
-      httpStatus: response.status,
-    }));
-    throw new Error('Live token gateway returned an invalid token response.');
-  }
-  console.info('[LIVE_GATEWAY_TOKEN_RECEIVED]', JSON.stringify({
-    status: 'success',
-    httpStatus: response.status,
-  }));
   return { name: result.token };
 }
 
