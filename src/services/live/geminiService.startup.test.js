@@ -172,6 +172,7 @@ test('uses the signed Live gateway when it is configured', async () => {
   const previousSdk = require.cache[sdkPath];
   const previousFetch = global.fetch;
   const originalInfo = console.info;
+  const infoLogs = [];
   const signingSecret = 'test-secret-with-more-than-thirty-two-bytes';
   let fetchRequest;
   let sdkClientCreated = false;
@@ -209,7 +210,7 @@ test('uses the signed Live gateway when it is configured', async () => {
       headers: { 'content-type': 'application/json' },
     });
   };
-  console.info = () => {};
+  console.info = (...args) => infoLogs.push(args);
 
   try {
     delete require.cache[servicePath];
@@ -219,6 +220,14 @@ test('uses the signed Live gateway when it is configured', async () => {
     });
 
     assert.equal(token.token, 'gateway-live-token');
+    assert.deepEqual(
+      infoLogs.filter(([label]) => label === '[LIVE_GATEWAY_CONNECTION]'),
+      [['[LIVE_GATEWAY_CONNECTION]', '{"status":"reachable","httpStatus":200}']],
+    );
+    assert.deepEqual(
+      infoLogs.filter(([label]) => label === '[LIVE_GATEWAY_TOKEN_RECEIVED]'),
+      [['[LIVE_GATEWAY_TOKEN_RECEIVED]', '{"status":"success","httpStatus":200}']],
+    );
     assert.equal(fetchRequest.url, 'http://127.0.0.1:8080/internal/v1/live-token');
     assert.equal(fetchRequest.method, 'POST');
     assert.equal(sdkClientCreated, false);
@@ -234,6 +243,71 @@ test('uses the signed Live gateway when it is configured', async () => {
   } finally {
     global.fetch = previousFetch;
     console.info = originalInfo;
+    delete require.cache[servicePath];
+    if (previousService) require.cache[servicePath] = previousService;
+    if (previousEnv) require.cache[envPath] = previousEnv;
+    else delete require.cache[envPath];
+    if (previousSdk) require.cache[sdkPath] = previousSdk;
+    else delete require.cache[sdkPath];
+  }
+});
+
+test('logs an unreachable gateway without exposing its URL or signing secret', async () => {
+  const servicePath = require.resolve('./geminiService');
+  const envPath = require.resolve('../../config/env');
+  const sdkPath = require.resolve('@google/genai');
+  const previousService = require.cache[servicePath];
+  const previousEnv = require.cache[envPath];
+  const previousSdk = require.cache[sdkPath];
+  const previousFetch = global.fetch;
+  const originalError = console.error;
+  const errorLogs = [];
+  const signingSecret = 'test-secret-with-more-than-thirty-two-bytes';
+
+  require.cache[envPath] = {
+    id: envPath,
+    filename: envPath,
+    loaded: true,
+    exports: {
+      env: {
+        geminiApiKey: '',
+        geminiLiveModel: 'gemini-3.1-flash-live-preview',
+        geminiLiveVoice: 'Leda',
+        liveGatewayUrl: 'https://gateway-secret-host.example',
+        liveGatewayHmacSecret: signingSecret,
+      },
+    },
+  };
+  require.cache[sdkPath] = {
+    id: sdkPath,
+    filename: sdkPath,
+    loaded: true,
+    exports: { GoogleGenAI: class MockGoogleGenAI {} },
+  };
+  global.fetch = async () => {
+    throw Object.assign(new Error('connection failed'), { code: 'ECONNREFUSED' });
+  };
+  console.error = (...args) => errorLogs.push(args);
+
+  try {
+    delete require.cache[servicePath];
+    const geminiService = require('./geminiService');
+    await assert.rejects(
+      geminiService.createLiveEphemeralToken('test-user'),
+      /connection failed/,
+    );
+
+    const connectionLog = errorLogs.find(([label]) => label === '[LIVE_GATEWAY_CONNECTION]');
+    assert.ok(connectionLog);
+    assert.deepEqual(JSON.parse(connectionLog[1]), {
+      status: 'unreachable',
+      errorCode: 'ECONNREFUSED',
+    });
+    assert.equal(JSON.stringify(errorLogs).includes(signingSecret), false);
+    assert.equal(JSON.stringify(errorLogs).includes('gateway-secret-host.example'), false);
+  } finally {
+    global.fetch = previousFetch;
+    console.error = originalError;
     delete require.cache[servicePath];
     if (previousService) require.cache[servicePath] = previousService;
     if (previousEnv) require.cache[envPath] = previousEnv;
