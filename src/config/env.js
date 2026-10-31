@@ -84,6 +84,8 @@ const env = {
   geminiApiKey: readEnv('GEMINI_API_KEY'),
   groqApiKey: readEnv('GROQ_API_KEY'),
   groqTextFallbackEnabled: readEnv('GROQ_TEXT_FALLBACK_ENABLED', 'false').toLowerCase() === 'true',
+  liveGatewayUrl: readEnv('KIARA_LIVE_GATEWAY_URL'),
+  liveGatewayHmacSecret: readEnv('KIARA_LIVE_GATEWAY_HMAC_SECRET'),
   geminiLiveModel: readEnv('GEMINI_LIVE_MODEL', ''),
   geminiLiveVoice: readEnv('GEMINI_LIVE_VOICE', ''),
   geminiEmbeddingModel: readEnv('GEMINI_EMBEDDING_MODEL', ''),
@@ -142,6 +144,7 @@ const env = {
   redisDb: readNumber('REDIS_DB', 0),
   redisUrl: readEnv('REDIS_URL', ''),
   redisPassword: readEnv('REDIS_PASSWORD', ''),
+  redisCaCertFile: readEnv('REDIS_CA_CERT_FILE', ''),
   liveMemoryEnabled: readEnv('LIVE_MEMORY_ENABLED', 'true').toLowerCase() === 'true',
   memoryRetrievalSourceTimeoutMs: readPositiveNumber('MEMORY_RETRIEVAL_SOURCE_TIMEOUT_MS', 10000),
   memoryRetrievalTimeoutMs: readPositiveNumber('MEMORY_RETRIEVAL_TIMEOUT_MS', 10000),
@@ -219,6 +222,9 @@ function validateProductionConfig() {
     .filter(([, value, fallback]) => isPlaceholder(value) || value === fallback)
     .map(([name]) => name);
 
+  const redisIssue = getProductionRedisConfigurationIssue(env);
+  if (redisIssue) missing.push(redisIssue);
+
   if (!isPlaceholder(env.jwtAccessSecret) && env.jwtAccessSecret.length < 32) {
     missing.push('JWT_ACCESS_SECRET (minimum 32 characters)');
   }
@@ -248,6 +254,21 @@ function validateProductionConfig() {
   if (missing.length) {
     throw new Error(`Invalid production configuration: ${missing.join(', ')}`);
   }
+}
+
+function getProductionRedisConfigurationIssue(configuration) {
+  if (configuration.nodeEnv !== 'production') return '';
+  if (!configuration.redisUrl) return 'REDIS_URL';
+
+  let protocol = '';
+  try {
+    protocol = new URL(configuration.redisUrl).protocol;
+  } catch {
+    return 'REDIS_URL (must be a valid Redis URL)';
+  }
+  return protocol === 'rediss:'
+    ? ''
+    : 'REDIS_URL (must use TLS with rediss:// in production)';
 }
 
 // Normalize a return URL for strict comparison when validating OAuth return targets
@@ -299,6 +320,7 @@ module.exports = {
   env,
   isProductionEnv,
   validateProductionConfig,
+  getProductionRedisConfigurationIssue,
   isAllowedCorsOrigin,
   isNativeAppOrigin,
   isAllowedOAuthReturnUrl,

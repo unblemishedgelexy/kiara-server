@@ -1,9 +1,18 @@
 'use strict';
 
+const fs = require('node:fs');
 const redis = require('redis');
 const { env } = require('../../config/env');
 
 const REDIS_LOGGING_ENABLED = (process.env.REDIS_LOGGING || '').toLowerCase() === 'true';
+
+function getRedisProtocol(redisUrl) {
+  try {
+    return new URL(redisUrl).protocol;
+  } catch {
+    return '';
+  }
+}
 
 function logRedis(level, ...args) {
   if (!REDIS_LOGGING_ENABLED) return;
@@ -35,9 +44,19 @@ function createRedisService({ createClient = redis.createClient, configuration =
   }
 
   function buildConnectionOptions() {
-    return configuration.redisUrl
-      ? { url: configuration.redisUrl }
-      : buildSocketOptions();
+    if (!configuration.redisUrl) return buildSocketOptions();
+
+    const options = { url: configuration.redisUrl };
+    if (getRedisProtocol(configuration.redisUrl) === 'rediss:') {
+      options.socket = {
+        tls: true,
+        rejectUnauthorized: true,
+        ...(configuration.redisCaCertFile
+          ? { ca: fs.readFileSync(configuration.redisCaCertFile) }
+          : {}),
+      };
+    }
+    return options;
   }
 
   async function connectClient(connectionOptions) {
@@ -104,10 +123,22 @@ function createRedisService({ createClient = redis.createClient, configuration =
   }
 
   async function initRedisInternal() {
+    if (
+      configuration.nodeEnv === 'production'
+      && getRedisProtocol(configuration.redisUrl) !== 'rediss:'
+    ) {
+      const error = new Error('Production Redis requires a TLS REDIS_URL using rediss://.');
+      error.code = 'REDIS_TLS_REQUIRED';
+      throw error;
+    }
+
     if (configuration.redisUrl) {
       try {
-        return await connectClient({ url: configuration.redisUrl });
+        return await connectClient(buildConnectionOptions());
       } catch (urlError) {
+        if (configuration.nodeEnv === 'production') {
+          throw urlError;
+        }
         if (!configuration.redisHost) {
           throw urlError;
         }

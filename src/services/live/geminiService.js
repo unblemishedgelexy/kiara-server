@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { createHash, createHmac, randomUUID } = require('node:crypto');
 const { GoogleGenAI } = require('@google/genai');
 const { env } = require('../../config/env');
 const { GEMINI_TEXT_MODEL } = require('../../config/constants');
@@ -48,6 +49,12 @@ initializeTraceFile();
 
 function hasGeminiServerAccess() {
   return Boolean(env.geminiApiKey);
+}
+
+function hasGeminiLiveAccess() {
+  return env.liveGatewayUrl
+    ? Boolean(env.liveGatewayHmacSecret)
+    : hasGeminiServerAccess();
 }
 
 function createGeminiClient(options = {}) {
@@ -172,7 +179,8 @@ async function executeGeminiRequest({ fn, metadata = {}, endpoint = 'unknown', m
   const requestId = traceMeta.requestId;
   const start = now();
 
-  if (!hasGeminiServerAccess()) {
+  const hasAccess = metadata?.isLive ? hasGeminiLiveAccess() : hasGeminiServerAccess();
+  if (!hasAccess) {
     const timestamp = now();
     writeTraceEntry({
       ...traceMeta,
@@ -315,14 +323,69 @@ async function summarizeConversation(input) {
 }
 
 const LIVE_TOKEN_CREATION_TIMEOUT_MS = 12000;
+const LIVE_GATEWAY_TOKEN_CREATION_TIMEOUT_MS = 40000;
+
+async function createLiveTokenThroughGateway({
+  expireTime,
+  newSessionExpireTime,
+  liveConnectConstraints,
+  signal,
+}) {
+  if (!env.liveGatewayHmacSecret) {
+    throw new Error('Live token gateway is configured without its signing secret.');
+  }
+
+  const gatewayUrl = new URL('/internal/v1/live-token', env.liveGatewayUrl);
+  if (process.env.NODE_ENV === 'production' && gatewayUrl.protocol !== 'https:') {
+    throw new Error('Live token gateway must use HTTPS in production.');
+  }
+
+  const body = JSON.stringify({
+    expireTime,
+    newSessionExpireTime,
+    liveConnectConstraints,
+  });
+  const timestamp = String(Date.now());
+  const nonce = randomUUID();
+  const bodyHash = createHash('sha256').update(body).digest('hex');
+  const signature = createHmac('sha256', env.liveGatewayHmacSecret)
+    .update(`${timestamp}.${nonce}.${bodyHash}`)
+    .digest('hex');
+  const response = await fetch(gatewayUrl, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-kiara-timestamp': timestamp,
+      'x-kiara-nonce': nonce,
+      'x-kiara-signature': signature,
+    },
+    body,
+    signal,
+  });
+
+  if (!response.ok) {
+    const error = new Error(
+      response.status === 503
+        ? 'Live token gateway is temporarily at capacity.'
+        : 'Live token gateway could not create a token.'
+    );
+    error.statusCode = response.status;
+    throw error;
+  }
+
+  const result = await response.json();
+  return { name: result.token };
+}
 
 async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   const lifecycleTrigger = options.lifecycleTrigger || 'LIVE_SESSION_START';
-  if (!hasGeminiServerAccess()) {
-    throw new Error('Gemini API key unavailable');
+  if (!hasGeminiLiveAccess()) {
+    throw new Error('Gemini API key or configured Live token gateway is unavailable.');
   }
 
-  const ai = createGeminiClient({ httpOptions: { apiVersion: 'v1alpha' } });
+  const ai = env.liveGatewayUrl
+    ? null
+    : createGeminiClient({ httpOptions: { apiVersion: 'v1alpha' } });
   const expiresInSeconds = 30 * 60;
   const newSessionWindowSeconds = 60;
   const expireTime = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
@@ -350,6 +413,18 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   const tokenCreationStartedAt = performance.now();
   const responsePromise = executeGeminiRequest({
     fn: async () => {
+      if (env.liveGatewayUrl) {
+        return createLiveTokenThroughGateway({
+          expireTime,
+          newSessionExpireTime,
+          liveConnectConstraints: {
+            model: sessionConfig.model,
+            config: liveConnectConfig,
+          },
+          signal: tokenAbortController.signal,
+        });
+      }
+
       return ai.authTokens.create({
         config: {
           uses: 1,
@@ -378,7 +453,9 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
         tokenAbortController.abort();
         reject(new Error('Live ephemeral token creation timed out.'));
       },
-      LIVE_TOKEN_CREATION_TIMEOUT_MS
+      env.liveGatewayUrl
+        ? LIVE_GATEWAY_TOKEN_CREATION_TIMEOUT_MS
+        : LIVE_TOKEN_CREATION_TIMEOUT_MS
     );
   });
 
@@ -397,17 +474,6 @@ async function createLiveEphemeralToken(requestingUserId = null, options = {}) {
   }
   const dur = performance.now() - tokenCreationStartedAt;
   recordGeminiMetric('gemini_ephemeral_token_generation', dur, { isLive: true });
-
-  // Save mapping from token name -> requesting user id for audit/troubleshooting
-  try {
-    const liveTokenStore = require('./liveTokenStore');
-    liveTokenStore.saveTokenMapping(response.name, requestingUserId || 'anonymous', expireTime);
-  } catch (error) {
-    console.warn('[LIVE_TOKEN_MAPPING]', JSON.stringify({
-      status: 'FAILED',
-      errorCode: error?.code || error?.name || 'TOKEN_MAPPING_FAILURE',
-    }));
-  }
 
   return {
     token: response.name,
@@ -452,4 +518,10 @@ async function generateText({ prompt, model, temperature = 0.5, candidateCount =
   };
 }
 
-module.exports = { hasGeminiServerAccess, summarizeConversation, createLiveEphemeralToken, generateText };
+module.exports = {
+  hasGeminiServerAccess,
+  hasGeminiLiveAccess,
+  summarizeConversation,
+  createLiveEphemeralToken,
+  generateText,
+};

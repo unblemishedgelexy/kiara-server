@@ -8,17 +8,13 @@ if (!uri) {
   process.exit(1);
 }
 
-const safeUri = uri.replace(/\/\/([^:]+):([^@]+)@/, "//***:***@");
-console.log("Testing MongoDB connection...");
-console.log("Target:", safeUri);
+console.log("Testing connection to configured MongoDB...");
 
 mongoose.connect(uri, {
   serverSelectionTimeoutMS: 10000,
 })
 .then(async () => {
   console.log("MONGO_CONNECT_SUCCESS");
-  console.log("Database:", mongoose.connection.name);
-  console.log("Host:", mongoose.connection.host);
   await mongoose.disconnect();
   console.log("MONGO_DISCONNECT_SUCCESS");
   process.exit(0);
@@ -26,7 +22,7 @@ mongoose.connect(uri, {
 .catch(async (error) => {
   console.error("MONGO_CONNECT_FAILED");
   console.error("Name:", error.name);
-  console.error("Message:", error.message);
+  console.error("Code:", error.code || "UNKNOWN");
   try {
     await mongoose.disconnect();
   } catch {}

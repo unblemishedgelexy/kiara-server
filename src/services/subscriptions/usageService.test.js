@@ -190,6 +190,7 @@ test('paid live quota blocks new sessions at the plan boundary', async () => {
         lean: async () => ({ role: 'user', isActive: true }),
       }),
     });
+
     Subscription.findOne = () => ({
       sort: () => ({
         lean: async () => ({
@@ -221,6 +222,39 @@ test('paid live quota blocks new sessions at the plan boundary', async () => {
     SubscriptionUsage.findOneAndUpdate = originals.usageFindOneAndUpdate;
     SubscriptionUsage.updateOne = originals.usageUpdateOne;
     SubscriptionUsage.findById = originals.usageFindById;
+  }
+});
+
+test('MongoDB usage-store outage fails closed before a Live session can be admitted', async () => {
+  const originalUserFindById = User.findById;
+  const originalUsageFindOneAndUpdate = SubscriptionUsage.findOneAndUpdate;
+  const originalSubscriptionFindOne = Subscription.findOne;
+  const databaseError = new Error('simulated MongoDB outage');
+  let subscriptionLookupCount = 0;
+
+  try {
+    User.findById = () => ({
+      select: () => ({
+        lean: async () => ({ role: 'user', isActive: true }),
+      }),
+    });
+    SubscriptionUsage.findOneAndUpdate = async () => {
+      throw databaseError;
+    };
+    Subscription.findOne = () => {
+      subscriptionLookupCount += 1;
+      throw new Error('Subscription lookup must not follow failed usage admission.');
+    };
+
+    await assert.rejects(
+      usageService.startLiveSession('mongo-outage-user'),
+      (error) => error === databaseError,
+    );
+    assert.equal(subscriptionLookupCount, 0);
+  } finally {
+    User.findById = originalUserFindById;
+    SubscriptionUsage.findOneAndUpdate = originalUsageFindOneAndUpdate;
+    Subscription.findOne = originalSubscriptionFindOne;
   }
 });
 

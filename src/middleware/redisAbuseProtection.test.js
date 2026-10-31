@@ -124,6 +124,34 @@ test('allows a route excluded by a narrower admission policy without consulting 
   assert.equal(res.statusCode, undefined);
 });
 
+test('account-scoped admission does not couple users through a shared IP bucket', async () => {
+  const calls = [];
+  const client = {
+    eval: async (script, options) => {
+      calls.push({ script, options });
+      return script.includes('EXISTS') ? [1, 1000] : 1;
+    },
+  };
+  const req = createRequest();
+  req.userId = 'synthetic-user';
+  req.ip = undefined;
+  const res = createResponse();
+  let nextCalled = false;
+  const middleware = redisAbuseProtection({
+    scope: 'account',
+    bucket: 'live-token',
+    getClient: async () => client,
+  });
+
+  await middleware(req, res, () => { nextCalled = true; });
+
+  assert.equal(nextCalled, true);
+  const admissionCalls = calls.filter(({ script }) => script.includes('EXISTS'));
+  assert.equal(admissionCalls.length, 1);
+  assert.match(admissionCalls[0].options.keys[0], /kiara:abuse:live-token:account:/);
+  assert.doesNotMatch(admissionCalls[0].options.keys[0], /:ip:/);
+});
+
 test('checks IP buckets and account admission concurrently while retaining every permit', async () => {
   const calls = [];
   let activeCalls = 0;

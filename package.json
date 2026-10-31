@@ -7,6 +7,7 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "razorpay:plans": "node scripts/setup-razorpay-plans.js",
+    "test:mongodb-connection": "node scripts/mongodb-connection-check.js",
     "test:subscriptions": "node --test src/config/subscriptionPlans.test.js src/services/razorpay/signatures.test.js src/services/subscriptions/usageService.test.js",
     "certify:gemini-session": "node scripts/run-gemini-session-certification.js",
     "certify:gemini-reality": "node scripts/run-gemini-reality-certification.js"

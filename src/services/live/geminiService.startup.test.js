@@ -162,3 +162,83 @@ test('aborts the provider token request when the caller disconnects', async () =
     else delete require.cache[sdkPath];
   }
 });
+
+test('uses the signed Live gateway when it is configured', async () => {
+  const servicePath = require.resolve('./geminiService');
+  const envPath = require.resolve('../../config/env');
+  const sdkPath = require.resolve('@google/genai');
+  const previousService = require.cache[servicePath];
+  const previousEnv = require.cache[envPath];
+  const previousSdk = require.cache[sdkPath];
+  const previousFetch = global.fetch;
+  const originalInfo = console.info;
+  const signingSecret = 'test-secret-with-more-than-thirty-two-bytes';
+  let fetchRequest;
+  let sdkClientCreated = false;
+
+  require.cache[envPath] = {
+    id: envPath,
+    filename: envPath,
+    loaded: true,
+    exports: {
+      env: {
+        geminiApiKey: '',
+        geminiLiveModel: 'gemini-3.1-flash-live-preview',
+        geminiLiveVoice: 'Leda',
+        liveGatewayUrl: 'http://127.0.0.1:8080',
+        liveGatewayHmacSecret: signingSecret,
+      },
+    },
+  };
+  require.cache[sdkPath] = {
+    id: sdkPath,
+    filename: sdkPath,
+    loaded: true,
+    exports: {
+      GoogleGenAI: class MockGoogleGenAI {
+        constructor() {
+          sdkClientCreated = true;
+        }
+      },
+    },
+  };
+  global.fetch = async (url, options) => {
+    fetchRequest = { url: String(url), ...options };
+    return new Response(JSON.stringify({ token: 'gateway-live-token' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  console.info = () => {};
+
+  try {
+    delete require.cache[servicePath];
+    const geminiService = require('./geminiService');
+    const token = await geminiService.createLiveEphemeralToken('test-user', {
+      lifecycleTrigger: 'LIVE_SESSION_START',
+    });
+
+    assert.equal(token.token, 'gateway-live-token');
+    assert.equal(fetchRequest.url, 'http://127.0.0.1:8080/internal/v1/live-token');
+    assert.equal(fetchRequest.method, 'POST');
+    assert.equal(sdkClientCreated, false);
+
+    const { createHash, createHmac } = require('node:crypto');
+    const bodyHash = createHash('sha256').update(fetchRequest.body).digest('hex');
+    const expectedSignature = createHmac('sha256', signingSecret)
+      .update(`${fetchRequest.headers['x-kiara-timestamp']}.${fetchRequest.headers['x-kiara-nonce']}.${bodyHash}`)
+      .digest('hex');
+    assert.equal(fetchRequest.headers['x-kiara-signature'], expectedSignature);
+    assert.equal(JSON.parse(fetchRequest.body).liveConnectConstraints.config.systemInstruction, LIVE_SYSTEM_INSTRUCTION);
+    assert.ok(fetchRequest.signal instanceof AbortSignal);
+  } finally {
+    global.fetch = previousFetch;
+    console.info = originalInfo;
+    delete require.cache[servicePath];
+    if (previousService) require.cache[servicePath] = previousService;
+    if (previousEnv) require.cache[envPath] = previousEnv;
+    else delete require.cache[envPath];
+    if (previousSdk) require.cache[sdkPath] = previousSdk;
+    else delete require.cache[sdkPath];
+  }
+});

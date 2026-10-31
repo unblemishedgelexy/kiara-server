@@ -12,6 +12,7 @@ const { GEMINI_TEXT_MODEL } = require('../config/constants');
 const {
   createLiveEphemeralToken,
 } = require('../services/../services/live/liveTokenService');
+const { hasGeminiLiveAccess } = require('../services/live/geminiService');
 
 const {
   streamElevenLabsSpeech,
@@ -26,7 +27,7 @@ const { getLiveTokenTraceId } = require('../services/live/liveTokenTiming');
 
 const router = express.Router();
 const protectExpensive = redisAbuseProtection({ scope: 'account-ip', bucket: 'expensive' });
-const protectLiveToken = redisAbuseProtection({ scope: 'account-ip', bucket: 'live-token' });
+const protectLiveToken = redisAbuseProtection({ scope: 'account', bucket: 'live-token' });
 
 const geminiHealth = require('../services/../services/live/geminiHealth');
 
@@ -178,7 +179,7 @@ router.get('/health', async (_req, res) => {
   try {
     const health = await geminiHealth.checkOnce();
 
-    const geminiConfigured = Boolean(env.geminiApiKey);
+    const geminiConfigured = hasGeminiLiveAccess();
     const geminiAvailable = Boolean(health.available);
     const elevenLabsConfigured = Boolean(
       env.elevenLabsApiKey && env.elevenLabsVoiceId
@@ -201,7 +202,7 @@ router.get('/health', async (_req, res) => {
       elevenLabsConfigured: Boolean(
         env.elevenLabsApiKey && env.elevenLabsVoiceId
       ),
-      geminiConfigured: Boolean(env.geminiApiKey),
+      geminiConfigured: hasGeminiLiveAccess(),
       geminiAvailable: false,
       geminiLastError: 'provider_unavailable',
       offlineMode: true,
@@ -499,6 +500,7 @@ router.post('/tts', authMiddleware, protectExpensive, async (req, res) => {
  * ElevenLabs TTS is intentionally NOT mixed into this route.
  */
 router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   const userId = req.userId || null;
   const traceId = getLiveTokenTraceId(req);
   if (
@@ -526,7 +528,15 @@ router.post('/token', authMiddleware, protectLiveToken, async (req, res) => {
     }
   }
 
-  if (!env.geminiApiKey) {
+  if (env.liveGatewayUrl && !env.liveGatewayHmacSecret) {
+    return res.status(503).json({
+      success: false,
+      code: 'LIVE_GATEWAY_AUTH_NOT_CONFIGURED',
+      error: 'Live session service is temporarily unavailable.',
+    });
+  }
+
+  if (!hasGeminiLiveAccess()) {
     res.status(200).json({
       offlineMode: true,
       mode: 'offline',
